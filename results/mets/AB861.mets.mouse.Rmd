@@ -1,0 +1,542 @@
+---
+title: 'PDX: Met project'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+subtitle: Mouse AB861
+layout: page
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(limma)
+library(edgeR)
+library(biomaRt)
+library(GSVA)
+library(RCurl)
+library(org.Mm.eg.db)
+library(pheatmap)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(ggbio)
+
+root.dir <- "~/OneDrive/projects/PDX/"
+
+source("~/OneDrive/projects/PDX/src/load.PDX.R")
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- meta[project=="characterisation" & patient=="AB861"]
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+
+load(paste0(root.dir,"data/gene.lists/mouse_c6_v5p2.rdata"))
+load(paste0(root.dir,"data/gene.lists/mouse_c2_v5p2.rdata"))
+```
+
+Merge lanes and meta
+
+```{r}
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta <- rnaseq$meta[,which(unlist(lapply(rnaseq$meta, function(x)!all(is.na(x))))),with=F]
+rnaseq$meta[,merged.lanes:=abbreviate(merged.lanes)]
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,xenograft])
+```
+
+#Key questions
+
+* Are there any expression differences between the patient’s primary and met samples?
+* Within model AB861M-X1T, are there any expression differences between the tumour and the lymph nodes mets?
+* Within model AB861M-X1T, are there any expression differences between the tumour fragments that did and did not metastasise? (see Abby)
+* Are there any expression differences between the tumours, as the models have been passaged and metastatic populations have been selected? E.g. compare tumours from AB861M-X1T, AB861X1M-X0T, AB861X1M1-X0T
+
+#PCAs
+
+Before we tackle the above, let's perform a few quick pca's.
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft])
+y <- log(x$mouse+0.5)
+pca <- prcomp(t(y[order(-1*apply(y,1,var)),][1:1000,]),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=exp.protocol) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=tissue.sampled) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=merged.lanes) + geom_point(size=5)
+```
+
+Second batch of outliers is caused by the different sequencing pool. Seperatly, we note that there is clustering based on the engrafted tissue and the experimental protocol. However, since these latter clusterings are not independent from one another, we cannot discern if the major transcriptomic change after the initial two passages is caused by changes in the tumor (tissue.grafted) or the changed protocol. Additional samples should be sequenced to try discern this. Note that this point in the sequential passages is the first time a mouse met is reimplanted.
+
+Can we account for the sequencing differences by scaling the library?
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft])
+
+y <- t(t(x$mouse) / calcNormFactors(x$mouse))
+y <- log(y+0.5)
+y <- y[order(-1*apply(y,1,var)),][1:1000,]
+
+pca <- prcomp(t(y),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=merged.lanes) + geom_point(size=5)
+```
+
+No, there is still a large batch effect associated with the sequencing differences. Let's account for it using a batch effect after the normalising by library size.
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft])
+
+y <- t(t(x$mouse) / calcNormFactors(x$mouse))
+y <- log(y+0.5)
+y <- y[order(-1*apply(y,1,var)),][1:1000,]
+
+tissue.sampled <- make.names(x$meta$tissue.sampled)
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+Pool <- make.names(x$meta$merged.lanes)
+d <- model.matrix(~ 0 + tissue.sampled + tissue.grafted + mouse.id)
+
+y <- removeBatchEffect(y,design = d, batch = Pool)
+
+pca <- prcomp(t(y),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=exp.protocol) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=tissue.sampled) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=merged.lanes) + geom_point(size=5)
+```
+
+
+#Tumour Vs. Lymph node mets
+
+## Model: ~ tissue.sampled + tissue.grafted + (batch)
+
+### Pipeline
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted!="AB861M"])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ tissue.sampled + tissue.grafted + mouse.id + merged.lanes)
+d <- d[,!(colnames(d) %in% c("mouse.idX45241","mouse.idX48803","mouse.idX48898"))]
+
+y <- DGEList(x$mouse[rowSums(cpm(x$mouse) > 1) >= 10,])
+y <- calcNormFactors(y,method="TMM")
+
+par(mfrow = c(1, 3))
+plotBCV(estimateDisp(y,d,robust=TRUE))
+v <- voom(y,design=d,plot=TRUE)
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=2)
+efit <- eBayes(vfit)
+plotSA(efit, main="Final model: Mean−variance trend")
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit,p.value = 0.01, lfc = 0)[,1])
+volcanoplot(efit)
+```
+
+### DE Results
+
+```{r}
+#Top DE genes table
+DE <- as.data.table(topTable(efit,lfc=0,p.value = 0.05, n=Inf),keep.rownames="ENSEMBL")
+DE[,direction:=factor(logFC>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+DE <- merge(DE,
+            select(org.Mm.eg.db,keys=DE[,ENSEMBL],keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")),
+            sort=F)
+table(DE[,direction])
+DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ Batch correction
+i <- match(DE$ENSEMBL,rownames(v$E))
+y <- removeBatchEffect(v$E[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+labels.col <- rep("",nrow(x$meta))
+labels.row <- DE$SYMBOL
+ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+rownames(ann.col) <- x$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#Pheatmap w/o Batch correction
+i <- match(DE$ENSEMBL,rownames(v$E))
+y <- v$E[i,]
+labels.col <- rep("",nrow(x$meta))
+labels.row <- DE$SYMBOL
+ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+rownames(ann.col) <- x$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#KARO
+exo <- exonsBy(TxDb.Mmusculus.UCSC.mm10.knownGene,"gene")
+exoRanges <- unlist(range(exo))
+sigRegions <- exoRanges[na.omit(match(DE$ENTREZID, names(exoRanges)))]
+sigRegions <- keepSeqlevels(sigRegions, paste0("chr", c(1:22,"X","Y")))
+mcols(sigRegions) <- DE[match(names(sigRegions), DE$ENTREZID),]
+autoplot(sigRegions,layout="karyogram",aes(colour=direction,fill=direction))
+
+#GSEA - C2
+ids <- mapIds(org.Mm.eg.db,keys=rownames(v),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+idx <- ids2indices(Mm.c2,id=ids)
+gsea <- as.data.table(camera(v,idx,d,contrast = 2,inter.gene.cor=0.05),keep.rownames=T)[FDR<0.05]
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - C6
+ids <- mapIds(org.Mm.eg.db,keys=rownames(v),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+idx <- ids2indices(Mm.c2,id=ids)
+gsea <- as.data.table(camera(v,idx,d,contrast = 2,inter.gene.cor=0.05),keep.rownames=T)[FDR<0.05]
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+
+
+### ssGSEA
+
+```{r}
+w <- v$E
+rownames(w) <- mapIds(org.Mm.eg.db,keys=rownames(w),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+w <- w[!is.na(rownames(w)),]
+w <- gsva(w,Mm.c2,rnaseq=TRUE,min.sz=5,max.sz=500)$es.obs
+
+wfit <- lmFit(w, d)
+wfit <- contrasts.fit(wfit, coefficients = 2)
+efit <- eBayes(wfit)
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit)[,1])
+volcanoplot(efit)
+
+DE <- as.data.table(topTable(efit,n=Inf,p.value=0.05),keep.rownames="gene.set")
+DE[,direction:=factor(logFC>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+
+table(DE[,direction])
+DE[direction=="up.reg",.(direction,gene.set,adj.P.Val)]
+DE[direction=="down.reg",.(direction,gene.set,adj.P.Val)]
+
+i <- match(DE$gene.set[1:min(c(50,nrow(DE)))],rownames(w))
+y <- removeBatchEffect(w[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+labels.col <- rep("",nrow(x$meta))
+labels.row <- rownames(y)
+ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+rownames(ann.col) <- x$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+
+
+## DE between "passages"
+
+### DE
+
+```{r}
+co <- 3:5
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=co)
+efit <- eBayes(vfit)
+DE <- as.data.table(decideTests(efit,p.value = 0.05),keep.rownames="ENSEMBL")
+DE <- DE[rowSums(DE[,-1])!=0]
+
+par(mfrow = c(2, 1))
+q <- DE[,2:(dim(DE)[2])]
+vennDiagram(q,cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(q,cex=0.8,include="down",main="Down.reg.DE")
+
+y <- v[rownames(v) %in% DE[rowSums(abs(DE[,-1]))==3,]$ENSEMBL,]$E
+y <- removeBatchEffect(y,design = model.matrix(~tissue.grafted), batch= tissue.sampled)
+labels.col <- rep("",nrow(x$meta))
+labels.row <- rep("",nrow(y))
+ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+rownames(ann.col) <- x$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+### ssGSEA
+
+```{r}
+
+w <- v$E
+rownames(w) <- mapIds(org.Mm.eg.db,keys=rownames(w),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+w <- w[!is.na(rownames(w)),]
+w <- gsva(w,Mm.c2,rnaseq=TRUE,min.sz=5,max.sz=500)$es.obs
+
+wfit <- lmFit(w, d)
+wfit <- contrasts.fit(wfit, coefficients = co)
+efit <- eBayes(wfit)
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit)[,1])
+volcanoplot(efit)
+
+DE <- as.data.table(decideTests(efit,p.value = 0.05),keep.rownames="gene.set")
+DE <- DE[rowSums(DE[,-1])!=0]
+y <- w[rownames(w) %in% DE[rowSums(abs(DE[,-1]))>1,]$gene.set,]
+y <- removeBatchEffect(y,design = model.matrix(~tissue.grafted), batch= tissue.sampled)
+labels.col <- rep("",nrow(x$meta))
+labels.row <- rownames(y)
+ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+rownames(ann.col) <- x$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+
+
+## Model: ~ tissue.sampled*tissue.grafted + (batch)
+
+### Pipeline
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted!="AB861M"])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ tissue.sampled * tissue.grafted + mouse.id + merged.lanes)
+d <- d[,!(colnames(d) %in% c("mouse.idX45241","mouse.idX48803","mouse.idX48898"))]
+
+x <- DGEList(x$mouse[rowSums(cpm(x$mouse) > 1) >= 10,])
+x <- calcNormFactors(x,method="TMM")
+
+co <- c(2,21:23)
+
+par(mfrow = c(1, 3))
+plotBCV(estimateDisp(x,d,robust=TRUE))
+v <- voom(x,design=d,plot=TRUE)
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=co)
+efit <- eBayes(vfit)
+plotSA(efit, main="Final model: Mean−variance trend")
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit)
+volcanoplot(efit)
+```
+
+### Results
+```{r}
+#Table of DE genes
+DE <- as.data.table(decideTests(efit,p.value = 0.05),keep.rownames="ENSEMBL")
+DE <- DE[rowSums(DE[,-1])!=0][!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+DE <- merge(DE,
+            select(org.Mm.eg.db,keys=DE[,ENSEMBL],keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")),
+            sort=F)
+DE[order(abs(rowSums(DE[,2:(dim(DE)[2]-3)])),decreasing = T)]
+model2.DE <- DE
+
+#VennDiagrms of DE genes
+par(mfrow = c(2, 1))
+q <- DE[,2:(dim(DE)[2]-3)]
+vennDiagram(q,cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(q,cex=0.8,include="down",main="Down.reg.DE")
+
+#GSEA
+gsea <- list()
+ids <- mapIds(org.Mm.eg.db,keys=rownames(v),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+idx <- ids2indices(Hs.c6,id=ids)
+for(i in co){
+  x <- as.data.table(camera(v,idx,d,contrast=i,inter.gene.cor=0.05),keep.rownames=T)[FDR<0.05]
+  if(nrow(x)!=0){
+    x$contrast <- colnames(d)[i]
+    gsea[[length(gsea)+1]] <- x
+  }
+}
+if(length(gsea)!=0){
+  gsea <- rbindlist(gsea)
+  gsea <- dcast(gsea,rn~contrast,value.var="Direction",fill=NA)
+  
+  #Table of GSEA
+  gsea[order(gsea[,max(table(na.omit(unlist(.SD)))),rn][,V1],decreasing=TRUE)]
+  
+  #VennDiagrms of GSEA
+  q <- ifelse(gsea[,-1]=="Up",1,-1)
+  q[is.na(q)] <- 0
+  par(mfrow = c(2, 1))
+  vennDiagram(q,cex=0.8,include="up",main="Up.reg.GSEA")
+  vennDiagram(q,cex=0.8,include="down",main="Down.reg.GSEA")
+}
+```
+
+### ssGSEA
+
+Don't bother considering the minimal signal observed performing the DE.
+
+
+## Model: ~ tissue.sampled:tissue.grafted + (batch)
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & mouse %in% rnaseq$meta[,.N,mouse][N==2,mouse]])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ tissue.sampled:tissue.grafted + mouse.id)
+d <- d[,!(colnames(d) %in% c("tissue.sampledT:tissue.graftedAB861M.XT1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1.XM1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1.XT1"))]
+
+y <- DGEList(x$mouse[rowSums(cpm(x$mouse) > 1) >= 2,])
+y <- calcNormFactors(y,method="TMM")
+
+co <- 12:15
+
+par(mfrow = c(1, 3))
+plotBCV(estimateDisp(y,d,robust=TRUE))
+v <- voom(y,design=d,plot=TRUE)
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=co)
+efit <- eBayes(vfit)
+plotSA(efit, main="Final model: Mean−variance trend")
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit)[,1])
+volcanoplot(efit)
+```
+
+### DE Results
+
+```{r}
+#Table of DE genes
+DE <- as.data.table(decideTests(efit,p.value = 0.05),keep.rownames="ENSEMBL")
+DE <- DE[rowSums(DE[,-1])!=0][!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+DE <- merge(DE,
+            select(org.Mm.eg.db,keys=DE[,ENSEMBL],keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")),
+            sort=F)
+DE[order(abs(rowSums(DE[,2:(dim(DE)[2]-3)])),decreasing = T)]
+model2.DE <- DE
+
+#VennDiagrms of DE genes
+par(mfrow = c(2, 1))
+q <- DE[,2:(dim(DE)[2]-3)]
+vennDiagram(q,cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(q,cex=0.8,include="down",main="Down.reg.DE")
+
+#GSEA
+gsea <- list()
+ids <- mapIds(org.Mm.eg.db,keys=rownames(v),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+idx <- ids2indices(Hs.c6,id=ids)
+for(i in co){
+  x <- as.data.table(camera(v,idx,d,contrast=i,inter.gene.cor=0.05),keep.rownames=T)[FDR<0.05]
+  if(nrow(x)!=0){
+    x$contrast <- colnames(d)[i]
+    gsea[[length(gsea)+1]] <- x
+  }
+}
+if(length(gsea)!=0){
+  gsea <- rbindlist(gsea)
+  gsea <- dcast(gsea,rn~contrast,value.var="Direction",fill=NA)
+  
+  #Table of GSEA
+  gsea[order(gsea[,max(table(na.omit(unlist(.SD)))),rn][,V1],decreasing=TRUE)]
+  
+  #VennDiagrms of GSEA
+  q <- ifelse(gsea[,-1]=="Up",1,-1)
+  q[is.na(q)] <- 0
+  par(mfrow = c(2, 1))
+  vennDiagram(q,cex=0.8,include="up",main="Up.reg.GSEA")
+  vennDiagram(q,cex=0.8,include="down",main="Down.reg.GSEA")
+}
+```
+
+
+
+#Mice with mets vs mice without mets (AB861M-XT1)
+
+## DE: human reads 
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted=="AB861M-XT1" & tissue.sampled=="T"])
+
+x$meta[,mets:=!(mouse %in% c(35309,35311,35311,35312,36361))]
+mets <- make.names(x$meta$mets)
+d <- model.matrix(~ mets)
+
+y <- DGEList(x$mouse[rowSums(cpm(x$mouse) > 1) >= 2,])
+y <- calcNormFactors(y,method="TMM")
+
+par(mfrow = c(1, 3))
+plotBCV(estimateDisp(y,d,robust=TRUE))
+v <- voom(y,design=d,plot=TRUE)
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=2)
+efit <- eBayes(vfit)
+plotSA(efit, main="Final model: Mean−variance trend")
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit)[,1])
+volcanoplot(efit)
+
+DE <- as.data.table(decideTests(efit,lfc=0,p.value = 0.05),keep.rownames="ensembl_gene_id")
+DE <- DE[as.logical(DE[,2]!=0)]
+table(DE[,2])
+
+ids <- mapIds(org.Mm.eg.db,keys=rownames(v),keytype = "ENSEMBL",column = "ENTREZID", multiVals = "first")
+idx <- ids2indices(Hs.c6,id=ids)
+gsea <- as.data.table(camera(v,idx,d,contrast = 2,inter.gene.cor=0.05),keep.rownames=T)[FDR<0.05]
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+## DE: mouse reads 
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted=="AB861M-XT1" & tissue.sampled=="T"])
+
+x$meta[,mets:=!(mouse %in% c(35309,35311,35311,35312,36361))]
+mets <- make.names(x$meta$mets)
+d <- model.matrix(~ mets)
+
+y <- DGEList(x$mouse[rowSums(cpm(x$mouse) > 1) >= 2,])
+y <- calcNormFactors(y,method="TMM")
+
+par(mfrow = c(1, 3))
+plotBCV(estimateDisp(y,d,robust=TRUE))
+v <- voom(y,design=d,plot=TRUE)
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, coefficients=2)
+efit <- eBayes(vfit)
+plotSA(efit, main="Final model: Mean−variance trend")
+
+#Sanity check plots
+par(mfrow = c(1, 2))
+plotMD(efit,status=decideTests(efit)[,1])
+volcanoplot(efit)
+
+DE <- as.data.table(decideTests(efit,lfc=0,p.value = 0.05),keep.rownames="ensembl_gene_id")
+DE <- DE[as.logical(DE[,2]!=0)]
+table(DE[,2])
+DE
+```
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```

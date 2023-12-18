@@ -1,0 +1,442 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: GDC (Susana)
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="drug.GDC.exp2"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+rnaseq$meta <- merge(rnaseq$meta, meta,sort=F)
+rnaseq$meta[,Group:=factor(Group)]
+
+GoI <- c("FOXM1","FOXO3","LDHA","HK2","PTEN")
+GoI <- data.table(select(org.Hs.eg.db,keys=GoI,keytype = "SYMBOL",columns = c("ENSEMBL","ENTREZID","SYMBOL")))
+GoI <- GoI[ENSEMBL!="ENSG00000284792"] #remove patched PTEN
+
+PoI <- list(
+  P13K = "AKT1 AKT2 AKT3 DEPDC5 DEPTOR IGF1R INPP4B MTOR NDRG1 PDK1 PIK3C2B PIK3CA PIK3R1 PPP2R1A PTEN RHEB RICTOR RPTOR RPS6 RPS6KB1 STK11 TSC1 TSC2", 
+  FOXM1 = "ARF AURKB AXIN2 BCAT1 BIRC5 BRCA1 BRCA2 CAT CCNB1 CCND1 CDH1 CDKN1A FOS MYC FOXO1 FOXA1 FOXA2 FOXO1 GATA3 NEK2 MYCN CDKN2A PLK1 SOD2 TERT TGFB1 KDR"
+)
+PoI <- sapply(PoI, strsplit, split=" ")
+PoI <- lapply(PoI, function(x) data.table(select(org.Hs.eg.db,keys=x,keytype = "SYMBOL",columns = c("ENSEMBL","ENTREZID","SYMBOL"))))
+```
+
+#QC
+
+```{r}
+read.depth.plots(rnaseq$meta)
+```
+
+
+Slightly higher mouse fraction than normal, but overall, this is damn near perfect.
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$human)
+pca <- cbind(rnaseq$meta,pca)
+plts <- list(
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Treatment.arm), upper=list(continuous='cor')),
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Group), upper=list(continuous='cor'))
+)
+for(p in plts) print(p, progress = F)
+```
+
+The largest differences are between the experimental groups (short treatment, long treatment, & resistant samples), with the application of the drug having a smaller, if any, effect. What do the PCAs look like if we look at each group inidividually? Also what are the outliers for group 1?
+
+```{r}
+plts <- lapply(levels(rnaseq$meta$Group),function(g){
+  rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == g])
+  pca <- pca.run(rnaseq.subset$human)
+  pca <- cbind(rnaseq.subset$meta,pca)
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Treatment.arm), upper=list(continuous='cor'),title = paste("Group:",g))
+})
+for(p in plts) print(p, progress = F)
+```
+
+There appears to be an outlier in group 1, which we will identify below. Otherwise, nothing of note, which indicates that there may not be large transcriptomic changes.
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == 1])
+pca <- pca.run(rnaseq.subset$human)
+pca <- cbind(rnaseq.subset$meta,pca)
+pca
+
+y <- pca.prep(rnaseq.subset$human,T,1000)
+y <- prcomp(t(y),scale=T)
+summary(y)
+```
+
+Outlier is "HCI011-T1-P01-18.9413R1-T1" w.r.t to PC1, whose only notable difference is a very low fraction of mouse (~2%).
+
+```{r}
+plts <- lapply(unique(rnaseq$meta$Treatment.arm),function(ta){
+  rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Treatment.arm == ta])
+  pca <- pca.run(rnaseq.subset$human)
+  pca <- cbind(rnaseq.subset$meta,pca)
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Group), upper=list(continuous='cor'),title = paste("Treatment arm:",ta))
+})
+for(p in plts) print(p, progress = F)
+```
+
+# ~ Treatment
+
+## Group 1
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == 1])
+#rnaseq.subset <- subset.PDX(rnaseq.subset, rnaseq.subset$meta[,Sample.name!="HCI011-T1-P01-18.9413R1-T1"])
+treatment <- rnaseq.subset$meta[,factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+
+d <- model.matrix(~ 0 + treatment)
+d
+
+cont.matrix <- matrix(c(-1,1), dim(d)[2], 1)
+colnames(cont.matrix) <- c("GDC.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.subset$human,d,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 1)
+if(nrow(DE[adj.P.Val<0.05])!=0){
+  DE <- DE[adj.P.Val<0.05]
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+} else {
+  head(DE,10)
+}
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- merge(y,rnaseq.subset$meta)
+ggplot(y) + aes(x=SYMBOL,y=Expression,color=Treatment.arm) + geom_boxplot() + stat_compare_means(aes(label=paste0("p.adj = ",..p.adj..)),method="t.test") + theme_tufte() + theme(legend.position = "top")
+
+## Heatmap
+labels.col <- rnaseq.subset$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq.subset$meta[,.(Treatment.arm)])
+rownames(ann.col) <- rnaseq.subset$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#GSEA
+
+## C6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+## Group 2
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == 2])
+treatment <- rnaseq.subset$meta[,factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+
+d <- model.matrix(~ 0 + treatment)
+d
+
+cont.matrix <- matrix(c(-1,1), dim(d)[2], 1)
+colnames(cont.matrix) <- c("GDC.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.subset$human,d,3,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 1)
+if(nrow(DE[adj.P.Val<0.05])!=0){
+  DE <- DE[adj.P.Val<0.05]
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+} else {
+  print("No DE genes found")
+  head(DE,10)
+}
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- merge(y,rnaseq.subset$meta)
+ggplot(y) + aes(x=SYMBOL,y=Expression,color=Treatment.arm) + geom_boxplot() + stat_compare_means(aes(label=paste0("p.adj = ",..p.adj..)),method="t.test") + theme_tufte() + theme(legend.position = "top")
+
+## Heatmap
+labels.col <- rnaseq.subset$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq.subset$meta[,.(Treatment.arm)])
+rownames(ann.col) <- rnaseq.subset$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+## Group 3
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == 3])
+treatment <- rnaseq.subset$meta[,factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+
+d <- model.matrix(~ 0 + treatment)
+d
+
+cont.matrix <- matrix(c(-1,1), dim(d)[2], 1)
+colnames(cont.matrix) <- c("GDC.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.subset$human,d,5,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 1)
+if(nrow(DE[adj.P.Val<0.05])!=0){
+  DE <- DE[adj.P.Val<0.05]
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+} else {
+  print("No DE genes found")
+  head(DE,10)
+}
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- merge(y,rnaseq.subset$meta)
+ggplot(y) + aes(x=SYMBOL,y=Expression,color=Treatment.arm) + geom_boxplot() + stat_compare_means(aes(label=paste0("p.adj = ",..p.adj..)),method="t.test") + theme_tufte() + theme(legend.position = "top")
+
+## Heatmap
+labels.col <- rnaseq.subset$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq.subset$meta[,.(Treatment.arm)])
+rownames(ann.col) <- rnaseq.subset$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+# ~ Group 
+
+## Vehicle
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Treatment.arm=="vehicle"])
+treatment.group <- rnaseq.subset$meta[,Group]
+
+d <- model.matrix(~ 0 + treatment.group)
+d
+
+cont.matrix <- matrix(c(-1,1,0,-1,0,1,0,-1,1), dim(d)[2], 3)
+colnames(cont.matrix) <- c("Long.minus.short","Resistant.minus.short","Resistant.minus.long")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.subset$human,d,3,cont.matrix = cont.matrix)
+
+dt <- decideTests(DE.data$efit)
+summary(dt)
+
+dt.common <- dt[rowSums(abs(dt))!=0,]
+vennDiagram(dt.common)
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- merge(y,rnaseq.subset$meta)
+ggplot(y) + aes(x=SYMBOL,y=Expression,color=Group) + geom_boxplot() + theme_tufte() + theme(legend.position = "top")
+
+## Heatmap
+labels.col <- rnaseq.subset$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq.subset$meta[,.(Group)])
+rownames(ann.col) <- rnaseq.subset$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+
+## Drug
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Treatment.arm=="GDC0032"])
+treatment.group <- rnaseq.subset$meta[,Group]
+
+d <- model.matrix(~ 0 + treatment.group)
+d
+
+cont.matrix <- matrix(c(-1,1,0,-1,0,1,0,-1,1), dim(d)[2], 3)
+colnames(cont.matrix) <- c("Long.minus.short","Resistant.minus.short","Resistant.minus.long")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.subset$human,d,4,cont.matrix = cont.matrix)
+
+dt <- decideTests(DE.data$efit)
+summary(dt)
+
+dt.common <- dt[rowSums(abs(dt))!=0,]
+vennDiagram(dt.common)
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- merge(y,rnaseq.subset$meta)
+ggplot(y) + aes(x=SYMBOL,y=Expression,color=Group) + geom_boxplot() + theme_tufte() + theme(legend.position = "top")
+
+## Heatmap
+labels.col <- rnaseq.subset$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq.subset$meta[,.(Group)])
+rownames(ann.col) <- rnaseq.subset$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+# ~ Treatment * Group
+
+```{r}
+treatment.group <- rnaseq$meta[,Group]
+treatment <- rnaseq$meta[,factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+
+d <- model.matrix(~ 0 + treatment.group * treatment)
+d
+
+DE.data <- DE.run(rnaseq$human,d,coefs = 1:6)
+
+dt <- decideTests(DE.data$efit)
+summary(dt)
+
+#Genes of Interest
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+
+## Boxplot
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- data.table(merge(y,rnaseq$meta))
+y[,Treatment.arm:=factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+levels(y$Treatment.arm) <- c("Vehicle","GDC0032")
+ggplot(y) + aes(x=Treatment.arm,y=Expression,color=Group) + geom_boxplot() + theme_tufte() + theme(legend.position = "top") + facet_wrap(~SYMBOL)
+ggplot(y) + aes(x=Group,y=Expression,color=Treatment.arm) + geom_boxplot() + theme_tufte() + theme(legend.position = "top") + facet_wrap(~SYMBOL)
+
+## Heatmap
+labels.col <- rnaseq$meta[,Barcode]
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq$meta[,.(Group,Treatment.arm)])
+rownames(ann.col) <- rnaseq$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="none")
+
+# Pathways of Interest
+plts <- lapply(PoI, function(p){
+  x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+  rownames(x) <- p$SYMBOL
+  x <- x[rowSums(is.na(x)) == 0,]
+  labels.col <- rnaseq$meta[,Barcode]
+  labels.row <- rownames(x)
+  ann.col <- as.data.frame(rnaseq$meta[,.(Group,Treatment.arm)])
+  rownames(ann.col) <- rnaseq$meta[,fname]
+  pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="none")
+})
+```
+
+```{r}
+ggplot(y[y$SYMBOL=="LDHA",]) + aes(x=Group,y=Expression,fill=Treatment.arm) + geom_boxplot() + stat_compare_means(label="p.format",method="t.test",method.args = list(alternative = "less"),label.y=9.7) + theme_tufte(12) + theme(legend.position = "top",legend.title=element_blank()) + ylab("LDHA Expression")
+```
+
+```{r}
+ggplot(y[y$SYMBOL=="FOXM1",]) + aes(x=Group,y=Expression,fill=Treatment.arm) + geom_boxplot() + stat_compare_means(label="p.format",method="t.test",method.args = list(alternative = "less"),label.y=9.7) + theme_tufte(12) + theme(legend.position = "top",legend.title=element_blank()) + ylab("FOXM1 Expression")
+```
+
+
+```{r}
+my_comparisons <- list(c("1","2"),c("2","3"),c("1","3"))
+ggplot(y[y$SYMBOL=="FOXM1" & Treatment.arm=="GDC0032",]) + aes(x=Group,y=Expression) + geom_boxplot() + stat_compare_means(label.y=8.5) + stat_compare_means(comparisons = my_comparisons,method.args = list(alternative = "less")) + theme_tufte(12) + theme(legend.position = "top") + ylab("FOXM1 Expression") + xlab("GDC-0032 Treated Group")
+```
+
+```{r}
+ggplot(y[Group%in%1 | (Group==3 & Treatment.arm=="GDC0032")]) + aes(x=interaction(Treatment.arm,Group),y=Expression,color=Group) + geom_boxplot() + theme_tufte() + theme(legend.position = "top") + facet_wrap(~SYMBOL)
+```
+
+```{R}
+z <- merge(data.table(t(x),keep.rownames = "fname"),rnaseq$meta)
+ggpairs(z,columns = 2:6)
+```

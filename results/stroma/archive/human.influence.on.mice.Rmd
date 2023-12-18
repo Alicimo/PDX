@@ -1,0 +1,244 @@
+---
+title: 'PDX: Characterisation'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+rnaseq <- get.PDX()
+meta <- load.meta()
+```
+
+```{r}
+meta.char <- subset.meta(meta,meta[,project=="characterisation"])
+meta.met <- subset.meta(meta,meta[,project=="metastasis"])
+meta.met[,.(sample.name=Sample.name,patient)]
+```
+
+# QC
+
+```{r}
+read.depth.plots(rnaseq$meta)
+```
+
+We have some failed samples and some tumours that are predominatly mouse (e.g., mouse tumor). To clear these let's:
+
+- remove samples with less than 1e6 total reads
+- remove samples with 90% mouse
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,
+                     (rnaseq$meta[,human.library.size+mouse.library.size]>1E6)  & (rnaseq$meta[,mouse.library.size/(human.library.size+mouse.library.size)] < 0.9))
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes.fac:=as.numeric(as.factor(merged.lanes))]
+```
+
+# Stroma grouping
+
+First, let us subset to only the patients with multiple PDX models and look at if the PDX samples group.
+
+```{r}
+stroma.set <- subset.PDX(rnaseq,
+                         rnaseq$meta[,patient %in% rnaseq$meta[,.N,.(patient,Sample.name)][,.N,patient][N>=3,patient]])
+rnaseq <- merge.PDX(rnaseq)
+ggplot(rnaseq$meta[,.N,patient][order(-N)]) + aes(x=patient,y=N) + geom_col()
+```
+
+And how many reads do we have in each of these samples? Note that we have already thresholded 
+
+Next, a PCA allows us an initial measure of the difference between the tumours sourced from different patients. We use the top 1000 most variable genes across all samples for this analysis, and log transform the values to make the underlying sample more normal.
+
+```{r}
+pca <- prcomp(t(log(rnaseq$mouse[order(-1*apply(rnaseq$mouse,1,var)),][1:1000,]+0.5)),scale=T)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=patient,shape=Pool) + geom_point(size=5)
+```
+
+There is clear separation of the different patients, as noted by the colours, in the above plot indicating that the mouse expression is in fact influenced by the human tissue. However, this is on the same scale as the technical variation, as noted by the dispersion between the different symbol types. If we account for the technical bias in our model, would should still be able to measure the variation between the various patients.
+
+```{r}
+rnaseq$mouse <- rnaseq$mouse[rowSums(cpm(rnaseq$mouse) > 1) >= 2,]
+x <- DGEList(rnaseq$mouse)
+x <- calcNormFactors(x, method="TMM")
+Pool <- make.names(rnaseq$meta$Pool)
+Source <- make.names(rnaseq$meta$source)
+Patient <- rnaseq$meta[,patient]
+d <- model.matrix(~ 0 + Patient + Pool)
+colnames(d) <- gsub("Patient","",colnames(d))
+v <- voom(x,design=d,plot=TRUE)
+```
+
+```{r}
+c <- do.call(cbind,(lapply(1:4,function(x){
+  c <- matrix(0, 6, 5-x)
+  c[x,] <- 1
+  c[(1+x):5, 1:(5-x)] <- -diag(5-x)
+  c
+})))
+colnames(c) <- combn(colnames(d)[1:5],2,paste0,collapse="vs")
+rownames(c) <- colnames(d)
+c
+
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, contrasts=c)
+efit <- eBayes(vfit)
+tfit <- treat(vfit,1)
+
+dt <- decideTests(efit,lfc=1)
+summary(dt)
+```
+
+We see that mice implanted with PDX124 are significantly different to all the other samples, with far fewer differentially expressed genes between the mice with other tumours implanted. Do different sets of genes define the difference of PDX124 with each of the other tumour sources?
+
+```{r}
+vennDiagram(dt[,c(1,5,6,7)])
+```
+
+Over 2000 genes are shared, which suggest that the mice implanted with tumour derived from patient PDX124 is completely different. Also, one should note that extreme difference between PDX124 and STG201. Are all the genes that are DE in these comparisons, DE the same way (up/down)?
+
+```{r}
+DE <- as.data.table(dt[apply(dt[,c(1,5,6,7)],1,function(x)all(x!=0)),c(1,5,6,7)],keep.rownames = T)
+names(DE)[1] <- "ensembl_gene_id"
+which(abs(DE[,2] - rowSums(DE[,3:5]))==3)
+```
+YES! They are DE the same manner for all 2000+ overlapping genes.
+
+What are these genes?
+
+```{r}
+DE <- merge(DE,getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),filter="ensembl_gene_id",values=DE$ensembl_gene_id,mart=ensembl),sort=F)
+DE
+```
+
+If we take the top 100 most signif DE genes of this set, how do the samples cluster?
+
+```{r,fig.height=10}
+i <- match(DE$ensembl_gene_id,rownames(v$E))[1:100]
+mycol <- colorpanel(1000,"blue","white","red")
+heatmap.2(v$E[i,], scale="row",labRow=DE$external_gene_name[1:100],col=mycol,labCol=rnaseq$meta$patient,trace="none", density.info="none",margin=c(12,6), lhei=c(1,5), dendrogram="column")
+```
+
+Let's perform a GSEA to determine the similar pathways that are DE when comparing mice implanted with PDX124 to the other patient tumours.
+
+```{r}
+c[,1] <- -c[,1]
+x <- getBM(attributes=c("ensembl_gene_id","entrezgene"),filter="ensembl_gene_id",values=rownames(v),mart=ensembl)
+idx <- ids2indices(Mm.c4,id=x[match(rownames(v),x$ensembl_gene_id),]$entrezgene)
+x <- rbindlist(lapply(c(1,5,6,7),function(i){as.data.table(camera(v,idx,d,contrast=c[,i]),keep.rownames=T)}))
+x <- x[FDR<0.05,.(unique(NGenes),unique(Direction),.N),rn]
+x[N==4,.(rn,V2)]
+```
+
+We find mainly metabolic and translation pathways unregulated within PDX124. In addition, multiple influenza related pathways are highly unregulated.
+
+Finally, we do not see any major differences between the various PDX124 samples.
+
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,patient=="PDX124"])
+pca <- prcomp(t(log(x$mouse[order(-1*apply(x$mouse,1,var)),][1:1000,]+0.5)),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=Sample.name) + geom_point(size=5)
+```
+
+#Take 2
+
+Let's repeat the entire analysis without the PDX124 samples.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,patient!="PDX124"])
+pca <- prcomp(t(log(rnaseq$mouse[order(-1*apply(rnaseq$mouse,1,var)),][1:1000,]+0.5)),scale=T)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=patient,shape=Pool) + geom_point(size=5)
+```
+
+There is clear separation of the different patients, as noted by the colours, in the above plot indicating that the mouse expression is in fact influenced by the human tissue. However, this is on the same scale, if not less than, the technical variation, as noted by the dispersion between the different symbol types. If we account for the technical bias in our model, would should still be able to measure the variation between the various patients.
+
+```{r}
+rnaseq$mouse <- rnaseq$mouse[rowSums(cpm(rnaseq$mouse) > 1) >= 2,]
+x <- DGEList(rnaseq$mouse)
+x <- calcNormFactors(x, method="TMM")
+Pool <- make.names(rnaseq$meta$Pool)
+Source <- make.names(rnaseq$meta$source)
+Patient <- rnaseq$meta[,patient]
+d <- model.matrix(~ 0 + Patient + Pool)
+colnames(d) <- gsub("Patient","",colnames(d))
+v <- voom(x,design=d,plot=TRUE)
+```
+
+```{r}
+c <- do.call(cbind,(lapply(1:4,function(x){
+  c <- matrix(0, 5, 4-x)
+  c[x,] <- 1
+  c[(1+x):4, 1:(4-x)] <- -diag(4-x)
+  c
+})))
+colnames(c) <- combn(colnames(d)[1:4],2,paste0,collapse="vs")
+rownames(c) <- colnames(d)
+c
+
+vfit <- lmFit(v, d)
+vfit <- contrasts.fit(vfit, contrasts=c)
+efit <- eBayes(vfit)
+tfit <- treat(vfit,1)
+
+dt <- decideTests(efit,lfc=1)
+summary(dt)
+```
+
+How much do the DE genes overlap?
+
+```{r,fig.width=10}
+y <- list(c(1,2,3),c(1,4,5),c(2,4,6),c(3,5,6))
+for(x in y){
+  vennDiagram(dt[,x])
+}
+```
+
+```{r}
+DE <- as.data.table(dt[which(rowSums(dt!=0)!=0),],keep.rownames = T)
+names(DE)[1] <- "ensembl_gene_id"
+DE <- merge(DE,getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),filter="ensembl_gene_id",values=DE$ensembl_gene_id,mart=ensembl),sort=F)
+DE
+```
+
+```{r,fig.height=10}
+i <- match(DE$ensembl_gene_id,rownames(v$E))
+mycol <- colorpanel(1000,"blue","white","red")
+heatmap.2(v$E[i,], scale="row",labRow=DE$external_gene_name,col=mycol,labCol=rnaseq$meta$patient, trace="none", density.info="none",margin=c(12,6), lhei=c(1,5), dendrogram="column")
+```
+Curiously, there appears to be a subset within STG201 with different expression profiles. Let's check this quickly with a pca.
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,patient=="STG201"])
+pca <- prcomp(t(log(rnaseq$mouse[order(-1*apply(rnaseq$mouse,1,var)),][1:1000,]+0.5)),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=as.factor(drug),shape=as.factor(batch)) + geom_point(size=5)
+```
+While there are a couple of outliers, but nothing to worry about (I think).
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,66 @@
+---
+title: 'PDX: Single End 50bp reads specificity'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F}
+library(ggplot2)
+library(ggthemes)
+library(pheatmap)
+library(data.table)
+
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+
+rnaseq <- list()
+
+rnaseq$meta <- fread(paste0(project.dir,"data/sequencing.length/featureCounts.50bp.meta.tsv"))
+counts <- fread(paste0(project.dir,"data/sequencing.length/featureCounts.50bp.counts.tsv"))
+
+gene.list <- counts[,Gene]
+counts <- as.matrix(counts[,-1])
+rownames(counts) <- gene.list
+
+if(any(rnaseq$meta[,fname] != colnames(counts))){stop()}
+
+rnaseq$mouse <- counts[substr(rownames(counts),1,4)=="ENSM",]
+rnaseq$human <- counts[substr(rownames(counts),1,4)=="ENSG",]
+
+rnaseq$meta[,mouse.library.size:=colSums(rnaseq$mouse)]
+rnaseq$meta[,human.library.size:=colSums(rnaseq$human)]
+```
+
+```{r}
+rnaseq.old <- get.PDX()
+meta.old <- load.meta()
+meta.old <- subset.meta(meta.old,meta.old[,project=="metastasis" & patient=="AB861"])
+rnaseq.old <- subset.PDX(rnaseq.old, rnaseq.old$meta[,Sample.name] %in% meta.old[,Sample.name])
+```
+
+```{r}
+read.depth.plots(rbind(rnaseq$meta,rnaseq.old$meta))
+```
+
+
+```{r}
+x <- rbind(rnaseq$meta,rnaseq.old$meta)
+x <- melt(x,id.vars=c("Sample.name","Flowcell","Lane","Pool"),measure.vars = c("mouse.library.size","human.library.size"))
+x <- x[,.(variable,value/sum(value)),.(Sample.name,Flowcell,Lane,Pool)][variable=="human.library.size"]
+ggplot(x) + aes(x=Pool,y=V2) + geom_boxplot() + geom_jitter()
+```
+

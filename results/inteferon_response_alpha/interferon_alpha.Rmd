@@ -1,0 +1,230 @@
+---
+title: 'PDX: IC10 Clustering'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+# Load libraries & functions
+```{r}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+ensembl.human = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
+ensembl.mouse = useEnsembl(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+```
+
+# RNAseq
+
+## Load PDX data
+```{r}
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="characterisation"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+
+rnaseq$meta[Sample.name=="AB793-T1-T" & Pool=="SLX-12501",Sample.name:=paste0(Sample.name,".R2")]
+meta <- rbind(meta,meta[Sample.name=="AB793-T1-T"])
+meta[nrow(meta),Sample.name:=paste0(Sample.name,".R2")]
+
+rnaseq <- merge.PDX(rnaseq)
+#rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,human.library.size > 1e6])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,mouse.library.size/(human.library.size+mouse.library.size) < .8])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,sample.type!="cell.line"])
+```
+
+## Remove bad(?) libraries
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(merged.lanes %in% c("SLX-12501:HFV2VBBXX:s_5","SLX-12507:HFV2VBBXX:s_6;SLX-12507:HFV2VBBXX:s_7"))])
+#rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+## ssGSEA
+
+```{R}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+set.seed(1); er.type <- kmeans(x[which(rownames(x) == "ENSG00000091831"),],2)$cluster
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+gs <- Hs.hm[which(names(Hs.hm) == "HALLMARK_INTERFERON_ALPHA_RESPONSE")]
+
+i <- which(rowSums(rnaseq$human$data) != 0)
+x <- rnaseq$human$data[i,]
+x <- DGEList(x)
+x <- calcNormFactors(x)
+x <- voom(x,design = model.matrix(~ 0 + sample.type + er.type + sequencing))
+x <- removeBatchEffect(x$E, batch=sequencing, design=model.matrix(~ 0 + sample.type + er.type))
+
+rownames(x) <- mapIds.ensembl(rownames(x),"human")
+x <- x[!is.na(rownames(x)),]
+x <- gsva(x,gs,min.sz=5,max.sz=500)
+x <- cbind(rnaseq$meta,"Interferon_alpha"=x[1,])
+
+ggplot(x,aes(x=sample.type,y=Interferon_alpha)) + geom_boxplot()
+
+p.IDs <- unique(rnaseq$meta[,.(patient,sample.type)])[,.N,patient][N==2,patient]
+y <- x[patient %in% p.IDs]
+y[,passage:=ifelse(is.na(passage),"P",as.character(passage))]
+ggplot(y,aes(x=patient,y=Interferon_alpha,label=paste(tissue.sampled,passage,sep=":"),color=sample.type)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+
+yy <- y[order(patient,sample.type)][,.(sample.type,tissue.sampled,passage,Interferon_alpha=Interferon_alpha - Interferon_alpha[1]),patient]
+ggplot(yy,aes(x=patient,y=Interferon_alpha,label=paste(tissue.sampled,passage,sep=":"),color=sample.type)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+```
+
+
+## Heatmap
+
+```{R}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+set.seed(1); er.type <- kmeans(x[which(rownames(x) == "ENSG00000091831"),],2)$cluster
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+gs <- Hs.hm[which(names(Hs.hm) == "HALLMARK_INTERFERON_ALPHA_RESPONSE")]
+
+i <- which(rowSums(rnaseq$human$data) != 0)
+x <- rnaseq$human$data[i,]
+x <- DGEList(x)
+x <- calcNormFactors(x)
+x <- voom(x,design = model.matrix(~ 0 + sample.type + er.type + sequencing))
+x <- removeBatchEffect(x$E, batch=sequencing, design=model.matrix(~ 0 + sample.type + er.type))
+
+rownames(x) <- mapIds.ensembl(rownames(x),"human")
+x <- x[!is.na(rownames(x)),] 
+x <- x[rownames(x) %in% gs$HALLMARK_INTERFERON_ALPHA_RESPONSE,]
+
+
+ann.col <- data.frame(rnaseq$meta[,.(sample.type,er.type=ifelse(er.type==1,"NEG","POS"))])
+rownames(ann.col) <- rnaseq$meta$Sample.name
+pheatmap(x,annotation_col = ann.col)
+
+p.IDs <- unique(rnaseq$meta[,.(patient,sample.type)])[,.N,patient][N==2,patient]
+i <- which(rnaseq$meta[,patient %in% p.IDs])
+i <- i[rnaseq$meta[i][,order(patient,sample.type)]]
+y <- x[,i]
+yy <- by(t(y),rnaseq$meta[i,patient],function(z) t(z) -t(z)[,1])
+yy <- do.call("cbind",yy)
+gaps <- which(rnaseq$meta[i,diff(as.numeric(factor(patient)))] == 1)
+rownames(yy) <- mapIds(org.Hs.eg.db,keys=rownames(yy),keytype = "ENTREZID",column = "SYMBOL", multiVals = "first")
+colnames(yy) <- gsub("T1-FF1","",colnames(yy))
+rownames(ann.col) <- gsub("T1-FF1","",rownames(ann.col))
+
+pheatmap(yy,annotation_col = ann.col[i,],cluster_cols = F,gaps_col = gaps)
+
+paletteLength <- 50
+myColor <- colorRampPalette(c("blue", "white", "red"))(paletteLength)
+myBreaks <- c(seq(min(yy), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(yy)/paletteLength, max(yy), length.out=floor(paletteLength/2)))
+pheatmap(yy,annotation_col = ann.col[i,],cluster_cols = F,gaps_col = gaps, color = myColor, breaks = myBreaks, fontsize_row = 6,cellheight = 5.5,show_colnames = F)
+```
+
+## ssGSEA w/ CD74 removed 
+
+```{R}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+set.seed(1); er.type <- kmeans(x[which(rownames(x) == "ENSG00000091831"),],2)$cluster
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+gs <- Hs.hm[which(names(Hs.hm) == "HALLMARK_INTERFERON_ALPHA_RESPONSE")]
+gs$HALLMARK_INTERFERON_ALPHA_RESPONSE <- gs$HALLMARK_INTERFERON_ALPHA_RESPONSE[gs$HALLMARK_INTERFERON_ALPHA_RESPONSE != "972"]
+
+i <- which(rowSums(rnaseq$human$data) != 0)
+x <- rnaseq$human$data[i,]
+x <- DGEList(x)
+x <- calcNormFactors(x)
+x <- voom(x,design = model.matrix(~ 0 + sample.type + er.type + sequencing))
+x <- removeBatchEffect(x$E, batch=sequencing, design=model.matrix(~ 0 + sample.type + er.type))
+
+rownames(x) <- mapIds.ensembl(rownames(x),"human")
+x <- x[!is.na(rownames(x)),]
+x <- gsva(x,gs,min.sz=5,max.sz=500)
+x <- cbind(rnaseq$meta,"Interferon_alpha"=x[1,])
+
+ggplot(x,aes(x=sample.type,y=Interferon_alpha)) + geom_boxplot()
+
+p.IDs <- unique(rnaseq$meta[,.(patient,sample.type)])[,.N,patient][N==2,patient]
+y <- x[patient %in% p.IDs]
+y[,passage:=ifelse(is.na(passage),"P",as.character(passage))]
+ggplot(y,aes(x=patient,y=Interferon_alpha,label=paste(tissue.sampled,passage,sep=":"),color=sample.type)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+
+yy <- y[order(patient,sample.type)][,.(sample.type,tissue.sampled,passage,Interferon_alpha=Interferon_alpha - Interferon_alpha[1]),patient]
+ggplot(yy,aes(x=patient,y=Interferon_alpha,label=paste(tissue.sampled,passage,sep=":"),color=sample.type)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+```
+
+# Sharepoint assay
+
+```{R}
+pdx.assay <- list(exp=read.csv2(paste0(project.dir,"data/figshare/ExpressionSamples.txt"),sep="\t"))
+pdx.assay$meta <- data.table(sname=colnames(pdx.assay$exp))
+pdx.assay$meta[,model:=tstrsplit(sname,"\\.")[[1]]]
+pdx.assay$meta[,sample:=tstrsplit(sname,"\\.")[[2]]]
+pdx.assay$meta[,xenograft:=grepl("X",sample)]
+```
+
+## ssGSEA
+```{r}
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+gs <- Hs.hm[which(names(Hs.hm) == "HALLMARK_INTERFERON_ALPHA_RESPONSE")]
+
+gl <- biomaRt::select(org.Hs.eg.db,keys=gs[[1]],keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME"))
+gl <- list(unique(gl[,"SYMBOL"]))
+names(gl) <- names(gs)
+
+x <- gsva(x,gl,min.sz=5,max.sz=500)
+x <- cbind(pdx.assay$meta,"Interferon_alpha"=x[1,])
+
+ggplot(x,aes(x=xenograft,y=Interferon_alpha)) + geom_boxplot()
+
+p.IDs <- unique(x[,.(model,xenograft)])[,.N,model][N==2,model]
+y <- x[model %in% p.IDs]
+ggplot(y,aes(x=model,y=Interferon_alpha,label=sample,color=xenograft)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+
+yy <- y[order(model,xenograft)][,.(xenograft,sample,Interferon_alpha=Interferon_alpha - Interferon_alpha[1]),model]
+ggplot(yy,aes(x=model,y=Interferon_alpha,label=sample,color=xenograft)) + geom_label() + coord_flip() + theme_bw() + theme(legend.position = "top")
+```
+
+
+## Heatmap
+
+```{R}
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+gs <- Hs.hm[which(names(Hs.hm) == "HALLMARK_INTERFERON_ALPHA_RESPONSE")]
+gl <- biomaRt::select(org.Hs.eg.db,keys=gs[[1]],keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME"))
+
+x <- pdx.assay$exp
+x <- data.matrix(x[rownames(x) %in% gl$SYMBOL,])
+
+ann.col <- data.frame(pdx.assay$meta[,.(sample.type=ifelse(xenograft,"PDX","Primary"))])
+rownames(ann.col) <- pdx.assay$meta$sname
+pheatmap(x,annotation_col = ann.col)
+
+p.IDs <- unique(x[,.(model,xenograft)])[,.N,model][N==2,model]
+y <- x[model %in% p.IDs]
+
+p.IDs <- unique(pdx.assay$meta[,.(model,xenograft)])[,.N,model][N==2,model]
+i <- which(pdx.assay$meta[,model %in% p.IDs])
+i <- i[pdx.assay$meta[i][,order(model,xenograft)]]
+y <- x[,i]
+yy <- by(t(y),pdx.assay$meta[i,model],function(z) t(z) -t(z)[,1])
+yy <- do.call("cbind",yy)
+gaps <- which(pdx.assay$meta[i,diff(as.numeric(factor(model)))] == 1)
+
+pheatmap(yy,annotation_col = ann.col[i,,drop=F],cluster_cols = F,gaps_col = gaps, height = 10, width = 10)
+```
+

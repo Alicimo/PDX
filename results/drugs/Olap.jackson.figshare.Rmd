@@ -1,0 +1,79 @@
+---
+title: 'Drug response - Cisplatin (Jackson)'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Metabric - BRCA1 drop outs
+layout: page
+---
+
+```{r, message=F, warning=F, echo=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"pdx/")
+
+library(data.table)
+library(ggplot2)
+library(pheatmap)
+
+load.drug.data <- function(project.dir){
+  drug.response <- fread(paste0(project.dir,"data/figshare/DrugResponsesAUCModels.txt"))
+  drug.response <- drug.response[Drug %in% c("Cisplatin","BMN-673")]
+  drug.response <- dcast(drug.response,Model~Drug,value.var = "AUC")
+  
+  CNA <- fread(paste0(project.dir,"data/figshare/CNAModels.txt"))
+  CNA <- CNA[Symbol %in% c("BRCA1","FAM35A","C20orf196","TP53")]
+  CNA <- dcast(melt(CNA,id.vars = "Symbol",variable.name = "Model"),Model~Symbol)
+  names(CNA)[-1] <- paste0(names(CNA)[-1],".CNA")
+  
+  expr <- fread(paste0(project.dir,"data/figshare/ExpressionModels.txt"))
+  expr <- expr[Gene %in% c("BRCA1","FAM35A","C20orf196","TP53")]
+  expr <- dcast(melt(expr,id.vars = "Gene",variable.name = "Model"),Model~Gene)
+  names(expr)[-1] <- paste0(names(expr)[-1],".expr")
+  
+  pathways <- fread(paste0(project.dir,"data/figshare/pathwaysReduced.txt"),fill=T)
+  names(pathways) <- c("pathway",head(names(pathways),-1))
+  pathways <- pathways[pathway == "BRCA1_DN.V1"]
+  pathways <- dcast(melt(pathways,id.vars = "pathway",variable.name = "Sample"),Sample~pathway)
+  pathways <- pathways[!(tstrsplit(Sample,"-")[[2]] %in% c("T","TR") | grepl("C",tstrsplit(Sample,"-")[[2]]))]
+  pathways[,Model:=tstrsplit(Sample,"-")[[1]]]
+  pathways <- pathways[,.(BRCA1_DN.V1=mean(BRCA1_DN.V1)),Model]
+  
+  Reduce(function(df1, df2) merge(df1, df2, by = "Model",all.x=T),list(drug.response,CNA,expr,pathways))
+}
+```
+
+```{r}
+data <- load.drug.data(project.dir)
+data[,BRCAness:=ifelse(BRCA1_DN.V1>0,"DN","UP")]
+data[,Cisplatin:=ifelse(Cisplatin<0.2,"Resistant","Sensitive")]
+data[,`BMN-673`:=ifelse(`BMN-673`<0.2,"Resistant","Sensitive")]
+
+data <- data[!is.na(`BMN-673`)]
+
+x <- t(as.data.frame(data[,.(FAM35A.expr,TP53.expr)]))
+colnames(x) <- data[,Model]
+
+ann.col <- as.data.frame(data[,.(BMN.673=`BMN-673`,Cisplatin,BRCAness)])
+rownames(ann.col) <- data[,Model]
+
+i <- data[,order(`BMN-673`,Cisplatin,BRCAness)]
+pheatmap(x[,i],annotation_col = ann.col[i,],cluster_cols = F,cluster_rows=F,scale = "row",cellwidth = 15, cellheight = 15, gaps_col=c(5))
+```
+
+```{r}
+ggplot(data) + aes(x=AUC<.2,y=FAM35A.expr,fill=AUC<.2) + geom_boxplot() + geom_point() #+ facet_grid(.~BRCA1_DN.V1>0, labeller = as_labeller(c("TRUE"="BRCA1 down","FALSE"="BRCA1 up")))
+```
+
+```{r}
+data[,C20orf196.CNA:=factor(C20orf196.CNA,levels=c("LOSS","NEUT","GAIN"))]
+ggplot(data[!( is.na(C20orf196.CNA) | C20orf196.CNA == "UNKNOWN") ]) + aes(x=C20orf196.CNA,fill=AUC<.2) + geom_bar() + facet_grid(.~BRCA1_DN.V1>0, labeller = as_labeller(c("TRUE"="BRCA1 down","FALSE"="BRCA1 up")))
+```
+

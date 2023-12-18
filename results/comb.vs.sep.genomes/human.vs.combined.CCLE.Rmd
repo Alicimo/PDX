@@ -1,0 +1,153 @@
+---
+title: 'PDX: Mouse vs. Combined'
+author: "Alistair Martin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+layout: page
+---
+
+# Load libraries and data
+
+```{r, message=FALSE, warning=FALSE}
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+
+load.counts <- function(fname){
+  counts <- fread(fname)
+  gene.list <- counts[,Geneid]
+  #gene.info <- counts[,1:6]
+  counts <- as.matrix(counts[,-(1:6)])
+  rownames(counts) <- gene.list
+  return(list(
+    "mouse"=counts[substr(rownames(counts),1,4)=="ENSM",,drop=F],
+    "human"=counts[substr(rownames(counts),1,4)=="ENSG",,drop=F]
+  ))
+}   
+  
+data.dir <- paste0(project.dir,"data/human.vs.comb/CCLE/")
+dnames <- list.dirs(data.dir,recursive = F)
+x <- lapply(dnames,function(dname){
+  x <- lapply(list.files(dname,full.names = T),load.counts)
+  x <- list(
+    do.call("cbind",lapply(x,"[[","mouse")),
+    do.call("cbind",lapply(x,"[[","human"))
+  )
+  for(i in 1:2) colnames(x[[i]]) <- paste0(basename(dname),".",colnames(x[[i]]))
+  return(x)
+})
+
+rnaseq <- list()
+rnaseq$count <- do.call("cbind",lapply(x,"[[",2))
+rnaseq$meta <- data.table(
+  sname=basename(colnames(rnaseq$count)),
+  genome=rep(sapply(dnames,basename),each=3),
+  sample.ID=gsub(".star.bam","",basename(colnames(rnaseq$count))),
+  library.size=colSums(rnaseq$count)/1E6
+)
+```
+
+Below we test for differences when one aligns human cell line rnaseq data against the combined (human + mouse) genome compared to the mouse genome alone. The below table indicates our experimental blanches/replicates:
+
+```{R}
+rnaseq$meta
+```
+
+```{r}
+100 * prop.table(matrix(unlist(lapply(x[[2]],colSums)),2,byrow = T),2)
+```
+
+```{r}
+-100*diff(matrix(colSums(rnaseq$count),2,byrow = T)) / colSums(rnaseq$count)[1:3]
+```
+
+# PCA Analysis
+
+In the below PCA plots we find that:
+
+* PC1 and PC2 accounts for 99% of the variance
+* Using PC1 and PC2 you can distinguish between the replicates
+* However, PC3 allows one to distinguish between the alignment using mouse only and combined.
+
+Please note that the PCA is calculated using the 1000 most variable genes. Since we expect more variation between the biological replicates, rather than the pipeline variants, this subsetting will be driven by the former.
+
+```{R, message=FALSE}
+x <- cbind(pca.run(rnaseq$count,rename = T),rnaseq$meta)
+ggpairs(x,columns = 1:4,
+        mapping = aes(color=factor(genome),shape=factor(sample.ID)),
+        progress = F,
+        lower  = list(continuous = "blank"),
+        upper  = list(continuous = "points"),
+        diag  = list(continuous = "blankDiag"))
+```
+
+PC3 is composed of contributions from the 1000 subsetted genes. The below plots show the percentage contributions of these genes w.r.t each of the principal components. We find that PC3 is dominated by a variation in a small set of genes, unlike PC1 and PC2, which vary instead across all genes.
+
+```{r}
+x <- pca.prep(rnaseq$count,T,1000)
+x <- prcomp(t(x),scale=T)
+x <- abs(x$rotation)
+x <- sweep(x,2,colSums(x),"/")
+csx <- apply(x, 2, function(y) cumsum(sort(y,dec=T)))
+
+ggplot(melt(x[,1:4])) + aes(x=value,colour=Var2) + geom_density()
+ggplot(melt(data.frame(cbind(ID=1:nrow(x),csx[,1:4])),id.vars="ID")) + aes(x=ID,y=value,color=variable) + geom_line()
+```
+
+The below list gives all genes which contribute at least 1% to PC3
+
+```{r}
+top.genes <- x[which(x[,3]>0.01),3,drop=F]
+if(nrow(top.genes)){
+  top.genes <- data.table(top.genes,keep.rownames = "ENSEMBL")
+  print(top.genes <- merge(
+    top.genes,
+    biomaRt::select(org.Hs.eg.db,keys=top.genes$ENSEMBL,keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL"))
+    ,sort=F
+  ))
+}
+```
+
+The below list gives all genes which contribute at least 1% to PC4
+
+```{r}
+top.genes <- x[which(x[,4]>0.01),3,drop=F]
+if(nrow(top.genes)){
+  top.genes <- data.table(top.genes,keep.rownames = "ENSEMBL")
+  print(top.genes <- merge(
+    top.genes,
+    biomaRt::select(org.Hs.eg.db,keys=top.genes$ENSEMBL,keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL"))
+    ,sort=F
+  ))
+}
+```
+
+# DE analysis
+
+Below we perform a differential expression analysis between the different alignment branches. We find that use of the combined genome over human alone can lead to genes being found to be differentially expressed. Unsurprisingly, these genes were also found to contribute highly to PC3 in the above analysis.
+
+```{r}
+genome <- factor(rnaseq$meta$genome)
+d <- model.matrix(~0+genome)
+colnames(d) <- gsub("genomefeatureCounts.","",colnames(d))
+
+cont <- makeContrasts(
+  b37.mmu10-b37,
+  levels=colnames(d)
+) 
+
+DE.data <- DE.run(rnaseq$count,d,cont.matrix = cont)
+
+for(i in 1:ncol(cont)){
+  print(colnames(cont)[i])
+  print(topTable.annotated.DE(DE.data$efit,coef=i))
+}
+```

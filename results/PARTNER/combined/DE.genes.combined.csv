@@ -1,0 +1,49 @@
+ENSEMBL,cohortAZD1775,cohortOlap.AZD1775,cohortOlaparib,ENTREZID,SYMBOL,GENENAME
+ENSG00000157617,0,0,-1,25966,C2CD2,C2 calcium dependent domain containing 2
+ENSG00000159259,0,0,-1,8208,CHAF1B,chromatin assembly factor 1 subunit B
+ENSG00000142409,0,0,-1,126208,ZNF787,zinc finger protein 787
+ENSG00000167766,0,0,1,55769,ZNF83,zinc finger protein 83
+ENSG00000161551,0,0,1,84765,ZNF577,zinc finger protein 577
+ENSG00000170608,0,0,-1,3171,FOXA3,forkhead box A3
+ENSG00000126254,0,0,-1,79171,RBM42,RNA binding motif protein 42
+ENSG00000187650,0,0,1,400673,VMAC,vimentin type intermediate filament associated coiled-coil protein
+ENSG00000267652,1,0,0,,,
+ENSG00000167549,0,1,0,84940,CORO6,coronin 6
+ENSG00000109046,0,0,1,26118,WSB1,WD repeat and SOCS box containing 1
+ENSG00000102901,0,0,1,80152,CENPT,centromere protein T
+ENSG00000196123,0,0,1,653319,KIAA0895L,KIAA0895 like
+ENSG00000102878,0,0,1,3299,HSF4,heat shock transcription factor 4
+ENSG00000184110,0,0,-1,8663,EIF3C,eukaryotic translation initiation factor 3 subunit C
+ENSG00000007520,0,0,-1,115939,TSR3,TSR3 ribosome maturation factor
+ENSG00000140297,0,0,1,9245,GCNT3,"glucosaminyl (N-acetyl) transferase 3, mucin type"
+ENSG00000175265,0,0,1,23015,GOLGA8A,golgin A8 family member A
+ENSG00000211448,0,-1,0,1734,DIO2,iodothyronine deiodinase 2
+ENSG00000179476,0,0,1,122525,C14orf28,chromosome 14 open reading frame 28
+ENSG00000120686,1,0,0,51569,UFM1,ubiquitin fold modifier 1
+ENSG00000139636,0,0,1,55716,LMBR1L,limb development membrane protein 1 like
+ENSG00000137745,0,1,0,4322,MMP13,matrix metallopeptidase 13
+ENSG00000110455,0,0,1,84680,ACCS,1-aminocyclopropane-1-carboxylate synthase homolog (inactive)
+ENSG00000108018,1,0,0,114815,SORCS1,sortilin related VPS10 domain containing receptor 1
+ENSG00000165730,0,-1,0,219736,STOX1,storkhead box 1
+ENSG00000165029,0,1,0,19,ABCA1,ATP binding cassette subfamily A member 1
+ENSG00000164879,0,0,1,761,CA3,carbonic anhydrase 3
+ENSG00000147437,0,0,1,2796,GNRH1,gonadotropin releasing hormone 1
+ENSG00000173275,0,0,1,203523,ZNF449,zinc finger protein 449
+ENSG00000105974,0,0,1,857,CAV1,caveolin 1
+ENSG00000135164,0,0,1,9988,DMTF1,cyclin D binding myb like transcription factor 1
+ENSG00000106133,0,0,1,260294,NSUN5P2,NSUN5 pseudogene 2
+ENSG00000188732,0,0,1,340277,FAM221A,family with sequence similarity 221 member A
+ENSG00000153291,0,0,1,9481,SLC25A27,solute carrier family 25 member 27
+ENSG00000178338,0,0,1,117608,ZNF354B,zinc finger protein 354B
+ENSG00000230551,0,0,1,,,
+ENSG00000151790,0,1,0,6999,TDO2,"tryptophan 2,3-dioxygenase"
+ENSG00000138764,0,0,1,901,CCNG2,cyclin G2
+ENSG00000205959,0,0,1,,,
+ENSG00000231574,0,1,0,102724550,LINC02015,long intergenic non-protein coding RNA 2015
+ENSG00000185565,0,0,-1,4045,LSAMP,limbic system associated membrane protein
+ENSG00000013441,0,0,1,1195,CLK1,CDC like kinase 1
+ENSG00000227671,0,0,1,,,
+ENSG00000086619,0,0,1,56605,ERO1B,endoplasmic reticulum oxidoreductase 1 beta
+ENSG00000188859,0,0,-1,149297,FAM78B,family with sequence similarity 78 member B
+ENSG00000143140,0,0,1,,,
+ENSG00000090273,0,0,-1,10726,NUDC,"nuclear distribution C, dynein complex regulator"

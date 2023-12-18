@@ -1,0 +1,206 @@
+SYMBOL,ENSEMBL,ENTREZID,GENENAME
+CDKN1A,ENSG00000124762,1026,cyclin dependent kinase inhibitor 1A
+CDKN1B,ENSG00000111276,1027,cyclin dependent kinase inhibitor 1B
+CDKN2A,ENSG00000147889,1029,cyclin dependent kinase inhibitor 2A
+CDKN2B,ENSG00000147883,1030,cyclin dependent kinase inhibitor 2B
+CDKN2C,ENSG00000123080,1031,cyclin dependent kinase inhibitor 2C
+CCND1,ENSG00000110092,595,cyclin D1
+CCND2,ENSG00000118971,894,cyclin D2
+CCND3,ENSG00000112576,896,cyclin D3
+CCNE1,ENSG00000105173,898,cyclin E1
+CDK2,ENSG00000123374,1017,cyclin dependent kinase 2
+CDK4,ENSG00000135446,1019,cyclin dependent kinase 4
+CDK6,ENSG00000105810,1021,cyclin dependent kinase 6
+RB1,ENSG00000139687,5925,RB transcriptional corepressor 1
+E2F1,ENSG00000101412,1869,E2F transcription factor 1
+E2F3,ENSG00000112242,1871,E2F transcription factor 3
+MYC,ENSG00000136997,4609,"MYC proto-oncogene, bHLH transcription factor"
+EIF4EBP1,ENSG00000187840,1978,eukaryotic translation initiation factor 4E binding protein 1
+AKT1,ENSG00000142208,207,AKT serine/threonine kinase 1
+AKT2,ENSG00000105221,208,AKT serine/threonine kinase 2
+AKT3,ENSG00000117020,10000,AKT serine/threonine kinase 3
+AKT1S1,ENSG00000204673,84335,AKT1 substrate 1
+DEPDC5,ENSG00000100150,9681,DEP domain containing 5
+DEPTOR,ENSG00000155792,64798,DEP domain containing MTOR interacting protein
+INPP4B,ENSG00000109452,8821,inositol polyphosphate-4-phosphatase type II B
+MAPKAP1,ENSG00000119487,79109,MAPK associated protein 1
+MLST8,ENSG00000167965,64223,"MTOR associated protein, LST8 homolog"
+MTOR,ENSG00000198793,2475,mechanistic target of rapamycin kinase
+NPRL2,ENSG00000114388,10641,"NPR2 like, GATOR1 complex subunit"
+NPRL3,ENSG00000103148,8131,"NPR3 like, GATOR1 complex subunit"
+PDK1,ENSG00000152256,5163,pyruvate dehydrogenase kinase 1
+PIK3CA,ENSG00000121879,5290,"phosphatidylinositol-4,5-bisphosphate 3-kinase catalytic subunit alpha"
+PIK3CB,ENSG00000051382,5291,"phosphatidylinositol-4,5-bisphosphate 3-kinase catalytic subunit beta"
+PIK3R1,ENSG00000145675,5295,phosphoinositide-3-kinase regulatory subunit 1
+PIK3R2,ENSG00000105647,5296,phosphoinositide-3-kinase regulatory subunit 2
+PIK3R3,ENSG00000117461,8503,phosphoinositide-3-kinase regulatory subunit 3
+PPP2R1A,ENSG00000105568,5518,protein phosphatase 2 scaffold subunit Aalpha
+PTEN,ENSG00000171862,5728,phosphatase and tensin homolog
+RHEB,ENSG00000106615,6009,"Ras homolog, mTORC1 binding"
+RICTOR,ENSG00000164327,253260,RPTOR independent companion of MTOR complex 2
+RPTOR,ENSG00000141564,57521,regulatory associated protein of MTOR complex 1
+RPS6,ENSG00000137154,6194,ribosomal protein S6
+RPS6KB1,ENSG00000108443,6198,ribosomal protein S6 kinase B1
+STK11,ENSG00000118046,6794,serine/threonine kinase 11
+TSC1,ENSG00000165699,7248,TSC complex subunit 1
+TSC2,ENSG00000103197,7249,TSC complex subunit 2
+ABL1,ENSG00000097007,25,"ABL proto-oncogene 1, non-receptor tyrosine kinase"
+EGFR,ENSG00000146648,1956,epidermal growth factor receptor
+ERBB2,ENSG00000141736,2064,erb-b2 receptor tyrosine kinase 2
+ERBB3,ENSG00000065361,2065,erb-b2 receptor tyrosine kinase 3
+ERBB4,ENSG00000178568,2066,erb-b2 receptor tyrosine kinase 4
+PDGFRA,ENSG00000134853,5156,platelet derived growth factor receptor alpha
+PDGFRB,ENSG00000113721,5159,platelet derived growth factor receptor beta
+MET,ENSG00000105976,4233,"MET proto-oncogene, receptor tyrosine kinase"
+FGFR1,ENSG00000077782,2260,fibroblast growth factor receptor 1
+FGFR2,ENSG00000066468,2263,fibroblast growth factor receptor 2
+FGFR3,ENSG00000068078,2261,fibroblast growth factor receptor 3
+FGFR4,ENSG00000160867,2264,fibroblast growth factor receptor 4
+FLT3,ENSG00000122025,2322,fms related tyrosine kinase 3
+ALK,ENSG00000171094,238,ALK receptor tyrosine kinase
+RET,ENSG00000165731,5979,ret proto-oncogene
+ROS1,ENSG00000047936,6098,"ROS proto-oncogene 1, receptor tyrosine kinase"
+KIT,ENSG00000157404,3815,"KIT proto-oncogene, receptor tyrosine kinase"
+IGF1R,ENSG00000140443,3480,insulin like growth factor 1 receptor
+NTRK1,ENSG00000198400,4914,neurotrophic receptor tyrosine kinase 1
+NTRK2,ENSG00000148053,4915,neurotrophic receptor tyrosine kinase 2
+NTRK3,ENSG00000140538,4916,neurotrophic receptor tyrosine kinase 3
+SOS1,ENSG00000115904,6654,SOS Ras/Rac guanine nucleotide exchange factor 1
+GRB2,ENSG00000177885,2885,growth factor receptor bound protein 2
+PTPN11,ENSG00000179295,5781,protein tyrosine phosphatase non-receptor type 11
+KRAS,ENSG00000133703,3845,"KRAS proto-oncogene, GTPase"
+HRAS,ENSG00000174775,3265,"HRas proto-oncogene, GTPase"
+NRAS,ENSG00000213281,4893,"NRAS proto-oncogene, GTPase"
+RIT1,ENSG00000143622,6016,Ras like without CAAX 1
+ARAF,ENSG00000078061,369,"A-Raf proto-oncogene, serine/threonine kinase"
+BRAF,ENSG00000157764,673,"B-Raf proto-oncogene, serine/threonine kinase"
+RAF1,ENSG00000132155,5894,"Raf-1 proto-oncogene, serine/threonine kinase"
+RAC1,ENSG00000136238,5879,Rac family small GTPase 1
+MAP2K1,ENSG00000169032,5604,mitogen-activated protein kinase kinase 1
+MAP2K2,ENSG00000126934,5605,mitogen-activated protein kinase kinase 2
+MAPK1,ENSG00000100030,5594,mitogen-activated protein kinase 1
+TP53,ENSG00000141510,7157,tumor protein p53
+MDM2,ENSG00000135679,4193,MDM2 proto-oncogene
+MDM4,ENSG00000198625,4194,MDM4 regulator of p53
+ATM,ENSG00000149311,472,ATM serine/threonine kinase
+CHEK2,ENSG00000183765,11200,checkpoint kinase 2
+RPS6KA3,ENSG00000177189,6197,ribosomal protein S6 kinase A3
+ATR,ENSG00000175054,545,ATR serine/threonine kinase
+CHEK1,ENSG00000149554,1111,checkpoint kinase 1
+BRCA1,ENSG00000012048,672,BRCA1 DNA repair associated
+BRCA2,ENSG00000139618,675,BRCA2 DNA repair associated
+PLK1,ENSG00000166851,5347,polo like kinase 1
+CHD8,ENSG00000100888,57680,chromodomain helicase DNA binding protein 8
+LEF1,ENSG00000138795,51176,lymphoid enhancer binding factor 1
+LGR4,ENSG00000205213,55366,leucine rich repeat containing G protein-coupled receptor 4
+LGR5,ENSG00000139292,8549,leucine rich repeat containing G protein-coupled receptor 5
+LRP5,ENSG00000162337,4041,LDL receptor related protein 5
+LRP6,ENSG00000070018,4040,LDL receptor related protein 6
+LZTR1,ENSG00000099949,8216,leucine zipper like transcription regulator 1
+NDP,ENSG00000124479,4693,norrin cystine knot growth factor NDP
+PORCN,ENSG00000102312,64840,porcupine O-acyltransferase
+RSPO1,ENSG00000169218,284654,R-spondin 1
+SFRP1,ENSG00000104332,6422,secreted frizzled related protein 1
+SFRP2,ENSG00000145423,6423,secreted frizzled related protein 2
+SFRP4,ENSG00000106483,6424,secreted frizzled related protein 4
+SFRP5,ENSG00000120057,6425,secreted frizzled related protein 5
+SOST,ENSG00000167941,50964,sclerostin
+TCF7L1,ENSG00000152284,83439,transcription factor 7 like 1
+TLE1,ENSG00000196781,7088,"TLE family member 1, transcriptional corepressor"
+TLE2,ENSG00000065717,7089,"TLE family member 2, transcriptional corepressor"
+TLE3,ENSG00000140332,7090,"TLE family member 3, transcriptional corepressor"
+TLE4,ENSG00000106829,7091,"TLE family member 4, transcriptional corepressor"
+WIF1,ENSG00000156076,11197,WNT inhibitory factor 1
+ZNRF3,ENSG00000183579,84133,zinc and ring finger 3
+CTNNB1,ENSG00000168036,1499,catenin beta 1
+DVL1,ENSG00000107404,1855,dishevelled segment polarity protein 1
+DVL2,ENSG00000004975,1856,dishevelled segment polarity protein 2
+DVL3,ENSG00000161202,1857,dishevelled segment polarity protein 3
+FRAT1,ENSG00000165879,10023,FRAT regulator of WNT signaling pathway 1
+FRAT2,ENSG00000181274,23401,FRAT regulator of WNT signaling pathway 2
+FZD1,ENSG00000157240,8321,frizzled class receptor 1
+FZD10,ENSG00000111432,11211,frizzled class receptor 10
+FZD2,ENSG00000180340,2535,frizzled class receptor 2
+FZD3,ENSG00000104290,7976,frizzled class receptor 3
+FZD4,ENSG00000174804,8322,frizzled class receptor 4
+FZD5,ENSG00000163251,7855,frizzled class receptor 5
+FZD6,ENSG00000164930,8323,frizzled class receptor 6
+FZD7,ENSG00000155760,8324,frizzled class receptor 7
+FZD8,ENSG00000177283,8325,frizzled class receptor 8
+FZD9,ENSG00000188763,8326,frizzled class receptor 9
+WNT1,ENSG00000125084,7471,Wnt family member 1
+WNT10A,ENSG00000135925,80326,Wnt family member 10A
+WNT10B,ENSG00000169884,7480,Wnt family member 10B
+WNT11,ENSG00000085741,7481,Wnt family member 11
+WNT16,ENSG00000002745,51384,Wnt family member 16
+WNT2,ENSG00000105989,7472,Wnt family member 2
+WNT3A,ENSG00000154342,89780,Wnt family member 3A
+WNT4,ENSG00000162552,54361,Wnt family member 4
+WNT5A,ENSG00000114251,7474,Wnt family member 5A
+WNT5B,ENSG00000111186,81029,Wnt family member 5B
+WNT6,ENSG00000115596,7475,Wnt family member 6
+WNT7A,ENSG00000154764,7476,Wnt family member 7A
+WNT7B,ENSG00000188064,7477,Wnt family member 7B
+WNT8A,ENSG00000061492,7478,Wnt family member 8A
+WNT8B,ENSG00000075290,7479,Wnt family member 8B
+WNT9A,ENSG00000143816,7483,Wnt family member 9A
+WNT9B,ENSG00000158955,7484,Wnt family member 9B
+AMER1,ENSG00000184675,139285,APC membrane recruitment protein 1
+APC,ENSG00000134982,324,APC regulator of WNT signaling pathway
+AXIN1,ENSG00000103126,8312,axin 1
+AXIN2,ENSG00000168646,8313,axin 2
+DKK1,ENSG00000107984,22943,dickkopf WNT signaling pathway inhibitor 1
+DKK2,ENSG00000155011,27123,dickkopf WNT signaling pathway inhibitor 2
+DKK3,ENSG00000050165,27122,dickkopf WNT signaling pathway inhibitor 3
+DKK4,ENSG00000104371,27121,dickkopf WNT signaling pathway inhibitor 4
+GSK3B,ENSG00000082701,2932,glycogen synthase kinase 3 beta
+RNF43,ENSG00000108375,54894,ring finger protein 43
+TCF7,ENSG00000081059,6932,transcription factor 7
+TCF7L2,ENSG00000148737,6934,transcription factor 7 like 2
+CHD4,ENSG00000111642,1108,chromodomain helicase DNA binding protein 4
+TGFBR1,ENSG00000106799,7046,transforming growth factor beta receptor 1
+TGFBR2,ENSG00000163513,7048,transforming growth factor beta receptor 2
+ACVR2A,ENSG00000121989,92,activin A receptor type 2A
+ACVR1B,ENSG00000135503,91,activin A receptor type 1B
+SMAD2,ENSG00000175387,4087,SMAD family member 2
+SMAD3,ENSG00000166949,4088,SMAD family member 3
+SMAD4,ENSG00000141646,4089,SMAD family member 4
+NFE2L2,ENSG00000116044,4780,"nuclear factor, erythroid 2 like 2"
+KEAP1,ENSG00000079999,9817,kelch like ECH associated protein 1
+MAX,ENSG00000125952,4149,MYC associated factor X
+MGA,ENSG00000174197,23269,MAX dimerization protein MGA
+MLX,ENSG00000108788,6945,MAX dimerization protein MLX
+MLXIP,ENSG00000175727,22877,MLX interacting protein
+MLXIPL,ENSG00000009950,51085,MLX interacting protein like
+MNT,ENSG00000070444,4335,MAX network transcriptional repressor
+MXD1,ENSG00000059728,4084,MAX dimerization protein 1
+MXD3,ENSG00000213347,83463,MAX dimerization protein 3
+MXD4,ENSG00000123933,10608,MAX dimerization protein 4
+MXI1,ENSG00000119950,4601,"MAX interactor 1, dimerization protein"
+MYC,ENSG00000136997,4609,"MYC proto-oncogene, bHLH transcription factor"
+MYCL,ENSG00000116990,4610,"MYCL proto-oncogene, bHLH transcription factor"
+MYCN,ENSG00000134323,4613,"MYCN proto-oncogene, bHLH transcription factor"
+NFKB1,ENSG00000109320,4790,nuclear factor kappa B subunit 1
+NFKBIA,ENSG00000100906,4792,NFKB inhibitor alpha
+RAD50,ENSG00000113522,10111,RAD50 double strand break repair protein
+RAD51,ENSG00000051180,5888,RAD51 recombinase
+CASP3,ENSG00000164305,836,caspase 3
+CASP4,ENSG00000196954,837,caspase 4
+CASP6,ENSG00000138794,839,caspase 6
+CASP7,ENSG00000165806,840,caspase 7
+CASP8,ENSG00000064012,841,caspase 8
+CASP9,ENSG00000132906,842,caspase 9
+PTEN,ENSG00000171862,5728,phosphatase and tensin homolog
+FOXO3,ENSG00000118689,2309,forkhead box O3
+BAD,ENSG00000002330,572,BCL2 associated agonist of cell death
+BAX,ENSG00000087088,581,"BCL2 associated X, apoptosis regulator"
+BCL2,ENSG00000171791,596,BCL2 apoptosis regulator
+BCL2L1,ENSG00000171552,598,BCL2 like 1
+BAK1,ENSG00000030110,578,BCL2 antagonist/killer 1
+BID,ENSG00000015475,637,BH3 interacting domain death agonist
+MCL1,ENSG00000143384,4170,"MCL1 apoptosis regulator, BCL2 family member"
+BCL2,ENSG00000171791,596,BCL2 apoptosis regulator
+PRKDC,ENSG00000253729,5591,"protein kinase, DNA-activated, catalytic subunit"
+PARP1,ENSG00000143799,142,poly(ADP-ribose) polymerase 1
+PARP2,ENSG00000129484,10038,poly(ADP-ribose) polymerase 2
+WEE1,ENSG00000166483,7465,WEE1 G2 checkpoint kinase

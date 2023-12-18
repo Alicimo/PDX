@@ -1,0 +1,326 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Olaparib stroma
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+library(ggplot2)
+library(ggthemes)
+library(pheatmap)
+
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+load(paste0(root.dir,"shared.data/gene.lists/mouse_c6_v5p2.rdata"))
+load(paste0(root.dir,"shared.data/gene.lists/mouse_c2_v5p2.rdata"))
+
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="drug.olap"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+# QC
+
+This QC check was performed for the human reads. Let us proceeed to remove the same samples and merge.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(Sample.name %in% c("PDX124 Control resist OR (epp 14)_PDX124OR control2","201STG_ Olaparib-response_6350L_12R"))])
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+#Key questions
+
+* Are there any systematic differences between the control and treated groups?
+* Are there any traits/markers that define the speed with which resistance is devloped in the treated groups?
+* Is the transcriptome of the control group similar between mice?
+* Is resistance developed in different manners between the treated samples?
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$mouse)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=pdx) + geom_point(size=5)
+```
+
+Clear differences between the two PDX models. Interestingly the PDX124 and PDX124OR appear to be relatively similar. However, there is clearly a second group of outliers that need to be explained. These samples are:
+
+```{r}
+pca[PC2>10,Sample.name]
+```
+
+From the read depth plots above, we note that these two samples have a very low number of reads compared to the others. However, we are already normalising for library size using TMM in the above. As ibrary size normalisation does not integrate these outliers. Since there is no (known) batch effect associated with these outliers, we should likely remove them from the further analysis. (We could also do a hidden variable batch effect, though I dislike using them.)
+
+```{r}
+outliers <- c("PDX124 Control WT (epp 2)_PDX124wt control2","PDX124 Control resist OR (epp 13)_PDX124OR control1")
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,!(Sample.name %in% outliers)])
+```
+
+Let us repeat the PCA having removed these outliers and account for the PDX batch effects.
+
+```{r}
+y <- pca.prep(rnaseq$mouse)
+y <- removeBatchEffect(y,design = model.matrix(~rnaseq$meta$drug), batch= rnaseq$meta$pdx)
+
+pca <- prcomp(t(y),scale=T)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=pdx) + geom_point(size=5)
+```
+
+We appear to have a relatively good seperation between the control and the treated groups which will hopefully lead to a some noticable differences in the DE models.
+
+Lastly, there are two experimental batches within the STG201 experiments. Let us perform a pca on the samples from this PDX model only.
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,pdx=="STG201"])
+y <- pca.prep(x$mouse)
+pca <- prcomp(t(y),scale=T)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=factor(exp.batch)) + geom_point(size=5)
+```
+
+While there isn't a clear outlier in exp.batch. However, we know that one sample in this batch is from a different mother(?). This should confirm this later via exome, however for now we will remove it even though it does not appear different. Otherwise, the exp.bacth effect appears to be minimal.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,Sample.name!="201STG_ Olaparib-response_5272L_11L"])
+```
+
+# All data
+
+## Model: ~ drug + pdx
+
+```{r}
+drug <- make.names(rnaseq$meta$drug)
+pdx <- make.names(rnaseq$meta$pdx)
+exp.batch <- make.names(rnaseq$meta$exp.batch)
+d <- model.matrix(~ 0 + drug + pdx + exp.batch)
+d <- d[,colnames(d) != "exp.batchX2"]
+
+cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Olap.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq$mouse,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.01,spec="mouse")
+table(DE[,direction])
+DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC,GENENAME)]
+DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC,GENENAME)]
+
+#Pheatmap w/ batch correction
+i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+labels.col <- rep("",nrow(rnaseq$meta))
+labels.row <- DE$SYMBOL
+ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+rownames(ann.col) <- rnaseq$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Mm.c6,0.01,spec="mouse")
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Mm.c2,0.01,spec="mouse")
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+# ssGSEA
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Mm.c2,d,cont.matrix=cont.matrix,spec = "mouse")
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit,p.val = 0.01)
+ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+y <- removeBatchEffect(ssGSEA.data$w[i,],design = model.matrix(~drug), batch=pdx)
+labels.col <- rep("",nrow(rnaseq$meta))
+labels.row <- ssGSEA$gene.set
+ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+rownames(ann.col) <- rnaseq$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+```
+
+The DE ran smooth with a reasonably good common dispersion value (<0.5). This leads to a number of genes being identified as DE when accounting for tissue differences. Notably, and as seen in the human reads, there appears an up.regulation of immmuno pathways associated with the presence of the drug as noted via chemokines. Opposing this seems to be a down regulation in core cell pathways, namely glycolysis, mitosis, etc, alongside the presences of hypoxia. In addition, the ssGSEA reports far too many pathways as DE, which may be due to the low amount of reads associated with the mouse stroma. As such, we should discard this analysis.
+
+As an aside, let us check the coefficients associated with the different PDX models.
+
+```{r}
+drug <- make.names(rnaseq$meta$drug)
+pdx <- make.names(rnaseq$meta$pdx)
+exp.batch <- make.names(rnaseq$meta$exp.batch)
+d <- model.matrix(~ drug + pdx + exp.batch)
+d <- d[,colnames(d) != "exp.batchX2"]
+
+#Perform DE
+DE.data <- DE.run(rnaseq$mouse,d,2,coefs = 2:5)
+
+#Top DE genes table
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.01,spec="mouse")
+summary(apply(DE[,2:5],2,factor))
+```
+
+There is a very large difference between STG201 and PDX124(OR), and little difference between PDX124 and PDX124OR. This isn't suprising considering previous work indicates that the mouse stroma is informed by the PDX model.
+
+## Model: ~ drug:pdx
+
+As with human, though of less importance, one issue with the abova analysis is that it contains the model that has innate resistance, which could react in a different manner than the other PDX models. Let us look at the tissue types individually to see if this is true.
+
+```{r}
+drug <- make.names(rnaseq$meta$drug)
+pdx <- make.names(rnaseq$meta$pdx)
+exp.batch <- make.names(rnaseq$meta$exp.batch)
+d <- model.matrix(~ 0 + drug:pdx + exp.batch:pdx)
+d <- d[,colSums(d)!=0]
+d <- d[,colnames(d) != "pdxSTG201:exp.batchX2"]
+
+cont.matrix <- matrix(c(c(-1,1,0,0,0,0,0),
+            c(0,0,-1,1,0,0,0),
+            c(0,0,0,0,-1,1,0)),
+            dim(d)[2], 3)
+colnames(cont.matrix) <- paste(sort(unique(pdx)),"Olap.minus.control",sep=":")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+DE.data <- DE.run(rnaseq$mouse,d,2,cont.matrix = cont.matrix)
+
+#Table of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.01,spec = "mouse")
+DE
+
+#VennDiagrms of DE genes
+vennDiagram.paired(DE[,2:4])
+```
+
+We see that the PDX model with innate resistance has zero DE genes in contrast to the other models. This is unsuprising given that we do not have enough samples of this type after QC to perform statistical testing.
+
+However, the other models appear to react in different(ish) ways to the treatment with only two shared DE gene (AREG & KRT19). The lack of overlap could be due to the reduced statistical power. Let us remove the data on the resistant strain and perform the analysis again.
+
+# OR reduced.
+
+## Model: ~ 0 + drug + pdx
+
+```{r}
+rnaseq.noOR <- subset.PDX(rnaseq,rnaseq$meta[,pdx!="PDX124OR"]
+           )
+drug <- make.names(rnaseq.noOR$meta$drug)
+pdx <- make.names(rnaseq.noOR$meta$pdx)
+exp.batch <- make.names(rnaseq.noOR$meta$exp.batch)
+d <- model.matrix(~ 0 + drug + pdx + exp.batch)
+d <- d[,colnames(d) != "exp.batchX2"]
+
+cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Olap.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.noOR$mouse,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.01,spec = "mouse")
+table(DE[,direction])
+DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC,GENENAME)]
+DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC,GENENAME)]
+
+#Pheatmap w/ batch correction
+i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+labels.col <- rep("",nrow(rnaseq.noOR$meta))
+labels.row <- DE$SYMBOL
+ann.col <- as.data.frame(rnaseq.noOR$meta[,.(pdx,drug)])
+rownames(ann.col) <- rnaseq.noOR$meta[,Sample.name]
+pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Mm.c6,0.05,spec = "mouse")
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Mm.c2,0.05,spec = "mouse")
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+```
+
+So even though we have removed data, we are returned far more DE genes than before. This would indicate that we are correct in our hypothesis to remove the OR model for this analysis to be correct as even the mouse reacts differently to treatment when the tumour is resistant.
+
+Lastly, though we lack samples, we can attempt to model with interaction terms, incase the PDX models react in different ways. I suspect that this analysis is dominated by changes in STG201 due to the unbalanced data set.
+
+## Model: ~ 0 + drug * pdx
+
+```{r}
+rnaseq.noOR <- subset.PDX(rnaseq,rnaseq$meta[,pdx!="PDX124OR"]
+           )
+drug <- make.names(rnaseq.noOR$meta$drug)
+pdx <- make.names(rnaseq.noOR$meta$pdx)
+exp.batch <- make.names(rnaseq.noOR$meta$exp.batch)
+d <- model.matrix(~ 0 + drug * pdx + exp.batch)
+d <- d[,colnames(d) != "exp.batchX2"]
+
+cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Olap.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq.noOR$mouse,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05,spec = "mouse")
+```
+
+As we predicted, we remove all genes notes as DE. This could be due to the unbalanced dataset, as mentioned above, or the introduction of new coefficents which reduces the overall statisical power.
+
+Let us check the interaction coefficient (and others).
+
+```{r}
+drug <- make.names(rnaseq.noOR$meta$drug)
+pdx <- make.names(rnaseq.noOR$meta$pdx)
+exp.batch <- make.names(rnaseq.noOR$meta$exp.batch)
+d <- model.matrix(~ drug * pdx + exp.batch)
+d <- d[,colnames(d) != "exp.batchX2"]
+
+#Perform DE
+DE.data <- DE.run(rnaseq.noOR$mouse,d,2,coefs = 2:5)
+
+#Top DE genes table
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.01,spec="mouse")
+summary(apply(DE[,2:5],2,factor))
+```
+
+Interestingly the interaction term reports zero genes as DE. This is a reflection of the unbalanced data set. We also note that STG201 is very different to PDX124.
+
+#Session Info
+
+```{r}
+sessionInfo()
+```

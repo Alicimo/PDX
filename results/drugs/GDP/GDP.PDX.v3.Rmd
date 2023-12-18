@@ -1,0 +1,487 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes 
+    toc_float: yes
+subtitle: GDC (Susana)
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="drug.GDC.exp2"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+rnaseq$meta <- merge(rnaseq$meta, meta,sort=F)
+rnaseq$meta[,Group:=factor(Group)]
+
+#GoI <- c("FOXM1","FOXO3","LDHA","HK2","PTEN")
+GoI <- c("FOXM1","LDHA","HK2","PTEN")
+GoI <- data.table(biomaRt::select(org.Hs.eg.db,keys=GoI,keytype = "SYMBOL",columns = c("ENSEMBL","ENTREZID","SYMBOL")))
+GoI <- GoI[ENSEMBL!="ENSG00000284792"] #remove patched PTEN
+
+PoI <- list(
+  P13K = "AKT1 AKT2 AKT3 DEPDC5 DEPTOR IGF1R INPP4B MTOR NDRG1 PDK1 PIK3C2B PIK3CA PIK3R1 PPP2R1A PTEN RHEB RICTOR RPTOR RPS6 RPS6KB1 STK11 TSC1 TSC2", 
+  FOXM1 = "ARF AURKB AXIN2 BCAT1 BIRC5 BRCA1 BRCA2 CAT CCNB1 CCND1 CDH1 CDKN1A FOS MYC FOXO1 FOXA1 FOXA2 FOXO1 GATA3 NEK2 MYCN CDKN2A PLK1 SOD2 TERT TGFB1 KDR",
+  FOXM1.2 = "ARF AURKA AURKB AXIN2 BCAT BIRC5 BMI1 BRCA1 BRCA2 BRIP1 BUBR1 CAT CAV1 CCL11 CCL24 CCNB1 CCNB2 CCND1 CDC25A CDC25B CDH1 CDK1 CDKN1 CEBPB CENPA CENPF CFOS CHK1 CKS1 CMYC COX2 EXO1 FOXA1 FOXA2 FOXO1 GATA3 IGF1 JNK1 K154 KH1 KIS LAMA4 LOX1 LOXL2 MCM3 MMP2 MMP7 MMP9 NANOG NEDD4 NEK2 NMYC OCT4 P16INK4A PLK1 PLK4 POLE2 PRDX3 RAD51 RFC4 RFC4 RHOC ROCK1 SKP2 SOD2 SOX2 TERT TGFB TOPA2 UPAR VEGFA VEGFR2 XRCC1",
+  PI3K.resist = "NRG1 FGF3 FGF10 GPR161 TBC1D3G RIC8A DYRK1B AXL NMRK2 SRC CDK5R1 PRKACA PIM1 PIM3 PRKCZ AKT1 PDK1 AKT2 CCND1 PPP1R3B CRKL CRB3 SRP54 YAP1 ZSCAN20 SMAD5 SAMD4B B4GALT6 NUDT3 NUDT10 PIH1D3 MFSD5 C9orf24 C1QL2 PLEKHF1 GOLGA1 KCNIP1 PSMD13 PRAMEF9 USP38 SLC6A20 CMTM2 SLC51A PIK3CA PIK3CB MYCN",
+  PTEN.resist = "PTEN PIK3CA PIK3CB MYCN FGF10 P2RY2 SRC CDK5R1 PDK1 AKT1 AKT2 CCND1 PPM1K CRKL SRP54 YAP1 ZSCAN20 SMAD5 GOLGA1 PSMD2 USP38",
+  whatever = "BRCA1 BRCA2 PARP1 ATM ATR PRKDC BRCC3 BRIP1 FANCI MLH3 PALB2 RAD51 RAD51D SKP2 XRCC2 DDIT3 GADD45A",
+  whatever2 = "FOXM1 HK2 LDHA PTEN"
+)
+PoI <- sapply(PoI, strsplit, split=" ")
+PoI <- lapply(PoI, function(x) data.table(biomaRt::select(org.Hs.eg.db,keys=x,keytype = "SYMBOL",columns = c("ENSEMBL","ENTREZID","SYMBOL"))))
+```
+
+#QC
+
+```{r}
+read.depth.plots(rnaseq$meta)
+```
+
+
+Slightly higher mouse fraction than normal, but overall, this is damn near perfect.
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$human$data)
+pca <- cbind(rnaseq$meta,pca)
+plts <- list(
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Treatment.arm), upper=list(continuous='cor')),
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Group), upper=list(continuous='cor'))
+)
+for(p in plts) print(p, progress = F)
+```
+
+The largest differences are between the experimental groups (short treatment, long treatment, & resistant samples), with the application of the drug having a smaller, if any, effect. What do the PCAs look like if we look at each group inidividually? Also what are the outliers for group 1?
+
+```{r}
+plts <- lapply(levels(rnaseq$meta$Group),function(g){
+  rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == g])
+  pca <- pca.run(rnaseq.subset$human$data)
+  pca <- cbind(rnaseq.subset$meta,pca)
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Treatment.arm), upper=list(continuous='cor'),title = paste("Group:",g))
+})
+for(p in plts) print(p, progress = F)
+```
+
+There appears to be an outlier in group 1, which we will identify below. Otherwise, nothing of note, which indicates that there may not be large transcriptomic changes.
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group == 1])
+pca <- pca.run(rnaseq.subset$human$data)
+(pca <- cbind(rnaseq.subset$meta,pca))
+
+y <- pca.prep(rnaseq.subset$human$data,T,1000)
+y <- prcomp(t(y),scale=T)
+summary(y)
+```
+
+Outlier is "HCI011-T1-P01-18.9413R1-T1" w.r.t to PC1, whose only notable difference is a very low fraction of mouse (~2%).
+
+```{r}
+plts <- lapply(unique(rnaseq$meta$Treatment.arm),function(ta){
+  rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Treatment.arm == ta])
+  pca <- pca.run(rnaseq.subset$human$data)
+  pca <- cbind(rnaseq.subset$meta,pca)
+  ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(col=Group), upper=list(continuous='cor'),title = paste("Treatment arm:",ta))
+})
+for(p in plts) print(p, progress = F)
+```
+
+# DE: ~ inter(Treatment, Group) (groups 1 + 3)
+
+```{r}
+rnaseq.subset <- subset.PDX(rnaseq, rnaseq$meta[,Group!=2])
+treatment.group <- droplevels(rnaseq.subset$meta[,Group])
+treatment <- rnaseq.subset$meta[,factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+
+d <- model.matrix(~ 0 + interaction(treatment, treatment.group))
+colnames(d) <- gsub("interaction\\(treatment, treatment.group\\)","",colnames(d))
+d
+
+(cont <- makeContrasts(
+  T1vV1=GDC0032.1 - vehicle.1,
+  T3vV1=GDC0032.3 - vehicle.1,
+  V3vV1=vehicle.3 - vehicle.1,
+  T3vT1=GDC0032.3 - GDC0032.1,
+  V3vT1=vehicle.3 - GDC0032.1,
+  T3vV3=GDC0032.3 - vehicle.3,
+  ResisVsNiave= ((GDC0032.3 + vehicle.3) - (GDC0032.1 + vehicle.1))/2,
+  levels = colnames(d)
+))
+
+DE.data <- DE.run(rnaseq.subset$human$data,d,cont.matrix = cont)
+```
+
+## Output DE genes
+
+```{r}
+for(i in 1:ncol(cont)){
+  x <- topTable.annotated.DE(DE.data$efit,coef = i)
+  fwrite(x,paste0("~/Desktop/PDX.trailGDP.DE.",colnames(cont)[i],".csv"))
+}
+```
+
+## Decide test tables
+
+```{R}
+for(pv in c(5E-2,1E-2,1E-3)){
+  dt <- decideTests(DE.data$efit,p.value = pv)
+  print(pv)
+  print(summary(dt))
+}
+```
+
+## Pairwise comparisons
+
+```{r}
+dt <- decideTest.annotated.DE(DE.data$efit)
+dtv <- dt[,2:7]
+dtv <- dtv[,which(!(colnames(dtv) %in% c("T1vV1","T3vV3"))),with=F]
+dt <- dt[abs(rowSums(dtv)) == 4,]
+gene.sig <- dt$ENSEMBL
+x <- DE.data$v[rownames(DE.data$v) %in% gene.sig,]
+```
+
+### Venn diagrams
+
+```{r}
+vennDiagram.paired(dtv)
+```
+
+### Heatmaps
+
+```{r}
+labels.col <- gsub("HCI011-T1-P0.-18\\.","",rnaseq$meta$Sample.name)
+ann.col <- as.data.frame(rnaseq$meta[,.(Group,Treatment.arm)])
+rownames(ann.col) <- rnaseq$meta[,fname]
+pheatmap(x,labels_col=labels.col,show_rownames = F,annotation_col = ann.col,scale="row")
+pheatmap(x,labels_col=labels.col,show_rownames = F,annotation_col = ann.col,scale="none")
+```
+
+
+## GSEA
+
+### c6
+
+```{r}
+Hs.c6 <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/c6.all.v6.2.entrez.gmt"))
+for(i in 1:ncol(cont)){
+  x <- GSEA.run(DE.data$v,d,cont[,i],Hs.c6,igc=0.01)
+  fwrite(x,paste0("~/Desktop/PDX.trailGDP.GSEA.c6.",colnames(cont)[i],".csv"))
+}
+```
+
+```{r}
+Hs.c6 <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/c6.all.v6.2.entrez.gmt"))
+x <- lapply(1:ncol(cont), function(i){
+  x <- GSEA.run(DE.data$v,d,cont[,i],Hs.c6,FDR.thresh = Inf,sort=F,igc=0.01)
+  data.table(pathway=x$pathway,DE=ifelse(x$FDR<=0.05,ifelse(x$Direction=="Up",1,-1),0))
+})
+y <- do.call("cbind",c(x[[1]][,1],lapply(x,function(y)y[,2])))
+names(y)[-1] <- colnames(cont)
+```
+
+```{r}
+apply(y[,-1],2,table)
+```
+
+```{R}
+y.sub <- y[,2:7]
+y.sub <- y.sub[,which(!(colnames(y.sub) %in% c("T1vV1","T3vV3"))),with=F]
+y[abs(rowSums(y.sub)) == 4,]
+vennDiagram.paired(y.sub)
+```
+
+### Hallmark
+
+```{r}
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+for(i in 1:ncol(cont)){
+  x <- GSEA.run(DE.data$v,d,cont[,i],Hs.hm,igc=0.01)
+  fwrite(x,paste0("~/Desktop/PDX.trailGDP.GSEA.hallmark.",colnames(cont)[i],".csv"))
+}
+```
+
+```{r}
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+x <- lapply(1:ncol(cont), function(i){
+  x <- GSEA.run(DE.data$v,d,cont[,i],Hs.hm,FDR.thresh = Inf,sort=F,igc=0.01)
+  data.table(pathway=x$pathway,DE=ifelse(x$FDR<=0.05,ifelse(x$Direction=="Up",1,-1),0))
+})
+y <- do.call("cbind",c(x[[1]][,1],lapply(x,function(y)y[,2])))
+names(y)[-1] <- colnames(cont)
+```
+
+```{r}
+apply(y[,-1],2,table)
+```
+
+```{R}
+y.sub <- y[,2:7]
+y.sub <- y.sub[,which(!(colnames(y.sub) %in% c("T1vV1","T3vV3"))),with=F]
+y[abs(rowSums(y.sub)) == 4,]
+vennDiagram.paired(y.sub)
+```
+
+
+
+
+# Genes of Interest
+
+## lfc + pvals
+
+```{R}
+pvals <- lapply(1:ncol(cont), function(i) {
+  x <- topTable.annotated.DE(DE.data$efit,p.val = Inf,coef =i,ci=T)[ENSEMBL%in%GoI$ENSEMBL]
+  x[,adj.P.Val:=p.adjust(P.Value)]
+  return(x)
+})
+names(pvals) <- colnames(cont)
+pvals <- rbindlist(pvals,idcol = "contrast")
+pvals[,contrast:=factor(contrast,levels=c("T1vV1","T3vV1","V3vV1","T3vV3","T3vT1"))]
+pvals <- pvals[!is.na(contrast)]
+levels(pvals$contrast) <- gsub("v",":",levels(pvals$contrast))
+
+(p <- ggplot(pvals) + aes(x=contrast,y=logFC) +
+  geom_linerange(aes(ymin=CI.L,ymax=CI.R),colour="grey80",size=2) +
+  geom_point(aes(colour=cut(adj.P.Val,breaks = c(0,10^(-(3:1)),1))),size=3) + 
+  geom_hline(aes(yintercept=0),linetype="dashed",colour="grey80") + 
+  facet_grid(SYMBOL~.) + coord_flip() +
+  scale_colour_brewer(palette="Reds", direction=-1,name="adj.p.val",labels=paste("\u2264",(10^-(3:0))),drop=F) + 
+  labs(y="logFC of Expression",x="") + 
+  theme_bw() + theme(legend.position = "top") + guides(col=guide_legend(nrow=2,byrow=TRUE)))
+
+ggsave(filename = "~/Desktop/GDC.GoI.LFC.png",height=8,width=4)
+```
+
+## Pairs plot
+
+```{R}
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+x <- merge(data.table(t(x),keep.rownames = "fname"),rnaseq$meta)
+x[,group.treat:=interaction(Group,Treatment.arm)]
+ggpairs(x,columns = 2:6,mapping = aes(colour=group.treat),progress = F)
+```
+
+## Expression boxplots
+
+```{R}
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- data.table(merge(y,rnaseq$meta))
+y[,Treatment.arm:=factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+levels(y$Treatment.arm) <- c("Vehicle","GDC0032")
+p <- ggplot(y) + aes(x=Group,y=Expression,color=Treatment.arm) + geom_boxplot() + theme_tufte() + theme(legend.position = "top")
+p + facet_wrap(~SYMBOL)
+p + facet_wrap(~SYMBOL,scales = "free")
+```
+
+## Expression heatmap
+```{r}
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+labels.col <- gsub("HCI011-T1-P0.-18\\.","",rnaseq$meta$Sample.name)
+labels.row <- GoI$SYMBOL
+ann.col <- as.data.frame(rnaseq$meta[,.(Group,Treatment.arm)])
+rownames(ann.col) <- rnaseq$meta[,fname]
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="none")
+```
+
+# Pathways of Interest
+
+## Pvals
+
+```{r}
+dt <- decideTest.annotated.DE(DE.data$efit)
+lapply(PoI, function(x){
+  x <- rbindlist(lapply(names(dt)[2:8], function(cont){
+    dt.sub <- dt[which(dt[,cont,with=F]!=0),]
+    m <- matrix(c(
+      sum(x$ENSEMBL %in% dt.sub$ENSEMBL),
+      sum(!(x$ENSEMBL %in% dt.sub$ENSEMBL)),
+      nrow(dt.sub),
+      nrow(DE.data$v) - nrow(dt.sub)
+    ),nrow = 2)
+    ft <- fisher.test(m)
+    data.table(OR=ft$estimate,p.val=ft$p.val)
+  }))
+  x$cont <- names(dt)[2:8]
+  return(x)
+})
+```
+
+## Heatmaps
+
+```{r}
+for(i in 1:length(PoI)){
+  p <- PoI[[i]]
+  x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+  rownames(x) <- p$SYMBOL
+  x <- x[rowSums(is.na(x)) == 0,]
+  labels.col <- rnaseq.subset$meta[,Barcode]
+  labels.row <- rownames(x)
+  ann.col <- as.data.frame(rnaseq.subset$meta[,.(Group,Treatment.arm)])
+  rownames(ann.col) <- rnaseq.subset$meta[,fname]
+  #pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="none",main=names(PoI)[i])
+  #pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",main=names(PoI)[i])
+  pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",main=names(PoI)[i])
+}
+```
+
+
+```{r}
+ann.col <- as.data.frame(unique(rnaseq.subset$meta[,.(Treatment=Treatment.arm,Group)]))
+rownames(ann.col) <-paste(ann.col[,1],ann.col[,2],sep=".")
+ann.col$Treatment <- ifelse(ann.col$Treatment=="GDC0032","GDC0032","Vehicle")
+ann.col$Group <- ifelse(ann.col$Group==1,"Sensitive","Resistant")
+
+#i <- 3
+for(i in 1:length(PoI)){
+  p <- PoI[[i]]
+  x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+  x <- by(t(x),rnaseq.subset$meta[,interaction(Treatment.arm,Group,drop = T)],function(y) apply(y,2,mean) )
+  x <- sapply(x, as.vector)
+  rownames(x) <- p$SYMBOL
+  x <- x[rowSums(is.na(x)) == 0,]
+  x <- x[,match(colnames(x),rownames(ann.col))]
+  pheatmap(t(x[,c(2,4)]),annotation_row = ann.col,scale="column",show_rownames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_col = 30,treeheight_row=20,annotation_names_row=F,main=names(PoI)[i])
+}
+```
+
+```{R,eval=F}
+p <- PoI[[3]]
+x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+x <- by(t(x),rnaseq.subset$meta[,interaction(Treatment.arm,Group,drop = T)],function(y) apply(y,2,mean) )
+x <- sapply(x, as.vector)
+rownames(x) <- p$SYMBOL
+x <- x[rowSums(is.na(x)) == 0,]
+
+labels.row <- rownames(x)
+ann.col <- as.data.frame(unique(rnaseq$meta[,.(Treatment=Treatment.arm,Group)]))
+rownames(ann.col) <-paste(ann.col[,1],ann.col[,2],sep=".")
+
+ann.col$Treatment <- ifelse(ann.col$Treatment=="GDC0032","GDC0032","Vehicle")
+ann.col$Group <- ifelse(ann.col$Group==1,"Sensitive","Resistant")
+
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",show_colnames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_row = 30,treeheight_col=20,annotation_names_col=F,filename = "~/Desktop/PI3K.resist.pathway.potrait.pdf")
+
+pheatmap(t(x),labels_col=labels.row,labels_row=labels.col,annotation_row = ann.col,scale="column",show_rownames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_col = 30,treeheight_row=20,annotation_names_row=F,filename = "~/Desktop/PI3K.resist.pathway.landscape.pdf")
+```
+
+```{R,eval=F}
+p <- PoI[[5]]
+x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+x <- by(t(x),rnaseq.subset$meta[,interaction(Treatment.arm,Group,drop = T)],function(y) apply(y,2,mean) )
+x <- sapply(x, as.vector)
+rownames(x) <- p$SYMBOL
+x <- x[rowSums(is.na(x)) == 0,]
+
+labels.row <- rownames(x)
+ann.col <- as.data.frame(unique(rnaseq$meta[,.(Treatment=Treatment.arm,Group)]))
+rownames(ann.col) <-paste(ann.col[,1],ann.col[,2],sep=".")
+
+ann.col$Treatment <- ifelse(ann.col$Treatment=="GDC0032","GDC0032","Vehicle")
+ann.col$Group <- ifelse(ann.col$Group==1,"Sensitive","Resistant")
+
+#pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",show_colnames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_row = 30,treeheight_col=20,annotation_names_col=F,filename = "~/Desktop/Genes.resist.pathway.potrait.pdf")
+
+pheatmap(t(x),labels_col=labels.row,labels_row=labels.col,annotation_row = ann.col,scale="column",show_rownames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_col = 30,treeheight_row=20,annotation_names_row=F,filename = "~/Desktop/Genes.resist.pathway.landscape.pdf")
+```
+
+```{R,eval=F}
+p <- PoI[[6]]
+x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+x <- by(t(x),rnaseq.subset$meta[,interaction(Treatment.arm,Group,drop = T)],function(y) apply(y,2,mean) )
+x <- sapply(x, as.vector)
+rownames(x) <- p$SYMBOL
+x <- x[rowSums(is.na(x)) == 0,]
+
+labels.row <- rownames(x)
+ann.col <- as.data.frame(unique(rnaseq$meta[,.(Treatment=Treatment.arm,Group)]))
+rownames(ann.col) <-paste(ann.col[,1],ann.col[,2],sep=".")
+
+ann.col$Treatment <- ifelse(ann.col$Treatment=="GDC0032","GDC0032","Vehicle")
+ann.col$Group <- ifelse(ann.col$Group==1,"Sensitive","Resistant")
+
+#pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",show_colnames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_row = 30,treeheight_col=20,annotation_names_col=F,filename = "~/Desktop/Genes.resist.pathway.potrait.pdf")
+
+pheatmap(t(x),labels_col=labels.row,labels_row=labels.col,annotation_row = ann.col,scale="column",show_rownames=F,cellwidth=10, cellheight=10,border_color = "grey30",treeheight_col = 30,treeheight_row=20,annotation_names_row=F,filename = "~/Desktop/Genes.2.resist.pathway.landscape.pdf",height = 2)
+```
+
+## Boxplots
+
+```{R}
+for(i in 1:length(PoI)){
+  p <- PoI[[i]]
+  x <- DE.data$v$E[match(p$ENSEMBL,rownames(DE.data$v$E)),]
+  rownames(x) <- p$SYMBOL
+  x <- x[rowSums(is.na(x)) == 0,]
+  x <- cbind(rnaseq.subset$meta,t(x))
+  x <- melt(x,id.vars=1:ncol(rnaseq.subset$meta))
+  (p <- ggplot(x) + aes(x=variable,y=value,fill=interaction(Group,Treatment.arm,drop=T)) + geom_boxplot() + coord_flip() + theme_bw() + labs(x="Expression",y="",fill="") + theme(legend.position = "top"))
+}
+```
+
+# Archive
+
+## Boxplots with p.vals
+
+```{r}
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- data.table(merge(y,rnaseq.subset$meta))
+y[,Treatment.arm:=factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+levels(y$Treatment.arm) <- c("Vehicle","GDC0032")
+
+my_comps <- list(
+  c("Vehicle.Group:1","GDC0032.Group:1"),
+  c("Vehicle.Group:1","Vehicle.Group:3"),
+  c("Vehicle.Group:1","GDC0032.Group:3"),
+  c("GDC0032.Group:1","GDC0032.Group:3")
+)
+
+ggplot(y[y$SYMBOL=="FOXM1",]) + aes(x=comb,y=Expression,colour=Treatment.arm) + geom_boxplot() + stat_compare_means(comparisons=my_comps) + theme_tufte(12) + theme(legend.position = "top",legend.title=element_blank()) + ylab("FOXM1 Expression") + xlab("")
+```
+
+```{r}
+x <- DE.data$v$E[match(GoI$ENSEMBL,rownames(DE.data$v$E)),]
+rownames(x) <- GoI$SYMBOL
+y <- melt(x)
+names(y) <- c("SYMBOL","fname","Expression")
+y <- data.table(merge(y,rnaseq.subset$meta))
+y[,Treatment.arm:=factor(Treatment.arm,levels=c("vehicle","GDC0032"))]
+levels(y$Treatment.arm) <- c("Vehicle","GDC0032")
+
+my_comparisons <- list(c("1","2"),c("2","3"),c("1","3"))
+ggplot(y[y$SYMBOL=="FOXM1" & Treatment.arm=="GDC0032",]) + aes(x=Group,y=Expression) + geom_boxplot() + stat_compare_means(label.y=8.5) + stat_compare_means(comparisons = my_comparisons,method.args = list(alternative = "less")) + theme_tufte(12) + theme(legend.position = "top") + ylab("FOXM1 Expression") + xlab("GDC-0032 Treated Group")
+```
+
+
+
+```{R}
+z <- merge(data.table(t(x),keep.rownames = "fname"),rnaseq$meta)
+ggpairs(z,columns = 2:6)
+```

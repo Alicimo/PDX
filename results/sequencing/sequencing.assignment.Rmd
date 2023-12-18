@@ -1,0 +1,69 @@
+---
+title: 'PDX: Appropiate read length for sequencing'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+library(ggplot2)
+library(ggthemes)
+library(pheatmap)
+library(data.table)
+
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+meta <- fread(paste0(project.dir,"data/sequencing.length/merged.counts.meta.csv"))
+meta <- meta[substr(Sample.name,1,3)=="Uni"]
+meta <- meta[order(Sample.name)]
+```
+
+```{r}
+data <- lapply(meta[,fname],function(fname){
+  x <- fread(paste0("data/sequencing.length/merged.counts/",fname))
+  names(x) <- c("Length","Human","Mouse","Unmapped")
+  x$fname <- fname
+  x
+})
+names(data) <- meta[,Sample.name]
+```
+
+```{r}
+data <- lapply(meta[,unique(Sample.name)],function(sname){
+  i <- names(data) == sname
+  x <- as.data.table(Reduce('+',lapply(data[i],function(x){as.matrix(x[,.SD[,2:4]])})))
+  names(x) <- c("Human","Mouse","Unmapped")
+  x$Length <- 1:150
+  x$sname <- sname
+  x
+})
+names(data) <- meta[,unique(Sample.name)]
+```
+
+```{r}
+for(subname in unique(meta[,tstrsplit(Sample.name,"R")[1]][,V1])){
+  i <- tstrsplit(names(data),"R")[[1]] == subname
+  x <- rbindlist(data[i])
+  p <- ggplot(melt(x,id.vars = c("Length","sname"))) + aes(x=Length,y=value,fill=variable) + geom_col(position=position_fill()) + xlim(25,150) + facet_grid(sname~.) + ggtitle(subname)  + theme(legend.position = "top",panel.grid.major.y = element_line(colour = "white", size = 0.5))
+  print(p)
+}
+```
+
+```{r}
+for(subname in unique(meta[,tstrsplit(Sample.name,"R")[1]][,V1])){
+  i <- tstrsplit(names(data),"R")[[1]] == subname
+  x <- rbindlist(data[i])
+  p <- ggplot(melt(x,id.vars = c("Length","sname"),measure.vars = c("Human","Mouse"))) + aes(x=Length,y=value,fill=variable) + geom_col(position=position_fill()) + xlim(25,150) + facet_grid(sname~.) + ggtitle(subname)  + theme(legend.position = "top",panel.grid.major.y = element_line(colour = "white", size = 0.5))
+  print(p)
+}
+```

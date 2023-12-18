@@ -1,0 +1,92 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Selu VHIO098 Chr4 CNA
+layout: page
+---
+
+# Load libraries and data
+```{r, message=F, warning=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+rnaseq <- get.PDX()
+meta <- load.meta()
+
+meta <- subset.meta(meta,meta[,project=="drug.selu"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,human.library.size>1E6])
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta$merged.lanes!=4)
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta$Treatment!="Unknown")
+```
+```{r}
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+my.regions <- getBM(c("hgnc_symbol", "chromosome_name", "start_position", "end_position", "ensembl_gene_id"),
+                    filters = "chromosome_name",
+                    values = c("4"),
+                    mart = ensembl)
+
+x <- rnaseq$human
+x <- t(1E6 * t(x) / (colSums(x) * calcNormFactors(x)))
+x <- x[match(my.regions$ensembl_gene_id, rownames(x)),]
+x <- x[!is.na(rownames(x)),]
+x <- log(x+0.5)
+
+j <- which(rnaseq$meta[,PDX=="VHIO098"])
+x <- x[,j]
+y <- rnaseq$meta[j,]
+colnames(x) <- y$Mouse
+
+labels.col <- y$Mouse
+labels.row <- rep("",nrow(x))
+ann.col <- as.data.frame(y[,.(Treatment,Sequencing=factor(merged.lanes))])
+rownames(ann.col) <- y$Mouse
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,cluster_rows = F)
+```
+
+
+```{r}
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+gene.list <- c("AP3M2","IKBKB","VDAC3","THAP1","FNTA","PRKDC","MCM4","UBE2V2","ATP6V1H","TCEA1","MRPL15","IMPAD1","RAB2A")  
+
+gene.list <- getBM(c("hgnc_symbol", "chromosome_name", "start_position", "end_position", "ensembl_gene_id"),
+                    filters = "hgnc_symbol",
+                    values = gene.list,
+                    mart = ensembl)
+
+x <- rnaseq$human[match(gene.list$ensembl_gene_id, rownames(rnaseq$human)),]
+i <- !is.na(rownames(x))
+x <- x[i,]
+x <- t(1E6 * t(x) / (colSums(x) * calcNormFactors(x)))
+x <- log(x+0.5)
+
+j <- which(rnaseq$meta[,PDX=="VHIO098"])
+x <- x[,j]
+y <- rnaseq$meta[j,]
+colnames(x) <- y$Mouse
+
+labels.col <- y$Mouse
+labels.row <- gene.list$hgnc_symbol[i]
+ann.col <- as.data.frame(y[,.(Treatment,Sequencing=factor(merged.lanes))])
+rownames(ann.col) <- y$Mouse
+pheatmap(x,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="none",cluster_rows = F)
+```
+
+

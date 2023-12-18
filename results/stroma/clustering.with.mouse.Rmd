@@ -1,0 +1,193 @@
+---
+title: 'PDX: Mice influence'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(dendextend)
+
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+rnaseq <- get.PDX()
+meta <- load.meta()
+
+meta <- subset.meta(meta,meta[,project=="characterisation"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+```{r}
+meta[sample.type=="xenograft",.N,.(patient,tissue.sampled)][N>2]
+```
+
+```{r}
+meta <- meta[sample.type=="xenograft"]
+meta[,N:=.N,.(patient,tissue.sampled)]
+meta <- meta[N>2]
+meta[,N:=NULL]
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+```{r}
+read.depth.plots(rnaseq$meta)
+```
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name!="STG139-T1-X05-00-000000-T_R1"])
+```
+
+```{r}
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=abbreviate(merged.lanes)]
+```
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$human,rename = TRUE)
+pca <- cbind(pca,rnaseq$meta)
+pca[,colour:=interaction(patient,tissue.sampled,drop = T)]
+ggpairs(pca,columns = 1:3,mapping = aes(colour=colour))
+```
+
+PC3 appears to define the difference between the STG139 tumours. However, there appears to be an outlier.
+
+```{r}
+pca[patient=="STG139"][order(`PC3 (5.57%)`),.(Sample.name,`PC3 (5.57%)`)]
+```
+
+```{r}
+rnaseq$meta[Sample.name=="STG139-T1-X05-00-000000-T_R2",tissue.sampled:="M1"]
+```
+
+```{r}
+pca <- pca.run(rnaseq$mouse,rename = TRUE)
+pca <- cbind(pca,rnaseq$meta)
+pca[,colour:=interaction(patient,tissue.sampled,drop = T)]
+ggpairs(pca,columns = c(1:3,17),mapping = aes(colour=colour))
+```
+
+# Dendos
+
+```{r}
+x <- list(
+  human=pca.prep(rnaseq$human),
+  mouse=pca.prep(rnaseq$mouse),
+  combined=rbind(pca.prep(rnaseq$human),pca.prep(rnaseq$mouse))
+)
+  
+dendos <- lapply(x, function(y){
+  y <- t(scale(t(y)))
+  colnames(y) <- as.character(1:nrow(rnaseq$meta))
+  dendo <- as.dendrogram(hclust(dist(t(y),method = "euclidean")))
+  i <- as.numeric(labels(dendo))
+  dendo <- color_labels(dendo,col=rnaseq$meta[,as.numeric(interaction(patient,tissue.sampled,drop=T))][i])cor.dendlist(dend1234)
+  dendo
+})
+```
+
+```{r}
+dl1 <- dendlist(dendos$human,dendos$combined)
+dl1 <- untangle(dl1,method="step2side")
+
+dl2 <- dendlist(dendos$mouse,dl1[[2]])
+dl2 <- untangle(dl2,method="step1side")
+dl2 <- rev(dl2)
+
+layout(matrix(1:6, nrow=1, byrow=TRUE), widths=rep(c(5, 3, 5), 2))
+tanglegram(dl1[[1]],dl1[[2]],sort=F,highlight_branches_lwd = F, highlight_distinct_edges=F,common_subtrees_color_lines = F,just_one = F,main_left = "Human",main_right = "Combined")
+tanglegram(dl2[[1]],dl2[[2]],sort=F,highlight_branches_lwd = F, highlight_distinct_edges=F,common_subtrees_color_lines = F,just_one = F,main_right = "Mouse")
+```
+
+```{r}
+cor.dendlist(dendlist(human=dendos$human,combined=dendos$combined,mouse=dendos$mouse))
+```
+
+#IGP
+
+https://academic.oup.com/biostatistics/article/8/1/9/251048#2979265
+
+```{r}
+x <- list(
+  human=pca.prep(rnaseq$human),
+  mouse=pca.prep(rnaseq$mouse),
+  combined=rbind(pca.prep(rnaseq$human),pca.prep(rnaseq$mouse))
+)
+
+nns <- lapply(x, function(y){
+  y <- t(scale(t(y)))
+  #colnames(y) <- as.character(1:nrow(rnaseq$meta))
+  d <- as.matrix(dist(t(y),method = "euclidean"))
+  diag(d) <- NA
+  apply(d,1,which.min)
+})
+
+assigned.groups <- rnaseq$meta[,interaction(patient,tissue.sampled,drop = T)]
+x <- lapply(nns,function(nn){
+  x <- lapply(levels(assigned.groups),function(group){
+    i <- which(assigned.groups==group)
+    sum(nn[i] %in% i) / length(i)
+  })
+  names(x) <- levels(assigned.groups)
+  as.data.table(x)
+})
+x$N <- as.data.table(t(as.matrix.Vector(table(assigned.groups))))
+x <- rbindlist(x,idcol = "data")
+```
+
+```{r}
+y <- melt(x,id.vars = "data")
+ggplot(y[data!="N"]) + aes(x=variable,y=value,fill=data) + geom_col(position="dodge") + 
+  geom_text(aes(label=value,y=-.05),data=y[data=="N"]) + 
+  theme_tufte(20) + theme(axis.text.x = element_text(angle = 90,hjust=1))
+```
+
+#DE
+
+Let's see where the mouse genes rank in contrast to the human genes in a DE of one vs one comparisons.
+
+```{r}
+d <- model.matrix(~ 0 + interaction(patient,tissue.sampled,drop = T),data=rnaseq$meta)
+colnames(d) <- levels(rnaseq$meta[,interaction(patient,tissue.sampled,drop = T)])
+
+c <- matrix(c(
+    1,-1,0,0,
+    1,0,-1,0,
+    1,0,0,-1,
+    0,1,-1,0,
+    0,1,0,-1,
+    0,0,1,-1
+    ),dim(d)[2],factorial(dim(d)[2]-1))
+colnames(c) <- combn(colnames(d),2,paste,collapse=".vs.")
+rownames(c) <- colnames(d)
+
+DE.data.human <- DE.run(rnaseq$human,d,2,cont.matrix=c)
+DE.human <- decideTest.annotated.DE(DE.data.human$efit,p.val = 0.05)
+
+DE.data.mouse <- DE.run(rnaseq$mouse,d,2,cont.matrix=c)
+DE.mouse <- decideTest.annotated.DE(DE.data.mouse$efit,p.val = 0.05,spec = "mouse")
+
+de.gene.list <- lapply(1:(dim(c)[2]),function(i){
+  x <- rbind(
+    topTable(DE.data.human$efit,p.val=0.05,coef=i,n=Inf),
+    topTable(DE.data.mouse$efit,p.val=0.05,coef=i,n=Inf)
+  )
+  y <- rownames(x)[order(x[,3])]
+})
+
+lapply(de.gene.list,function(x) which(substr(x,1,4)!="ENSG")[1])
+lapply(de.gene.list,function(x) which(substr(x,1,4)!="ENSG")[1]/length(x))
+```

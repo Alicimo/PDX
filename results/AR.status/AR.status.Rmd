@@ -1,0 +1,265 @@
+---
+title: 'PDX: AR Status'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+layout: page
+---
+
+# Load libraries & functions
+
+```{r include=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+data.dir <- paste0(project.dir,"data/")
+
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+ensembl.human = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
+ensembl.mouse = useEnsembl(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+
+library(grid)
+library(gridExtra)
+```
+
+# Load PDX data
+
+```{r}
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="characterisation"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+
+rnaseq$meta[Sample.name=="AB793-T1-T" & Pool=="SLX-12501",Sample.name:=paste0(Sample.name,".R2")]
+meta <- rbind(meta,meta[Sample.name=="AB793-T1-T"])
+meta[nrow(meta),Sample.name:=paste0(Sample.name,".R2")]
+
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,human.library.size > 1e6])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,mouse.library.size/(human.library.size+mouse.library.size) < .8])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,sample.type!="cell.line"])
+
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(merged.lanes %in% c("SLX-12501:HFV2VBBXX:s_5","SLX-12507:HFV2VBBXX:s_6;SLX-12507:HFV2VBBXX:s_7"))])
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+
+# Subset data & transform
+
+```{r}
+model.list <- fread(paste0(data.dir,"androgen.receptor/AR.IHC.csv"))
+names(model.list) <- make.names(names(model.list))
+Hs.hm <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/h.all.v6.2.entrez.gmt"))
+Hs.c6 <- load_gene_set(paste0(root.dir,"shared.data/gene.lists/c6.all.v6.2.entrez.gmt"))
+
+rnaseq.subsets <- list(
+  PDX = subset.PDX(rnaseq, rnaseq$meta[,sample.type=="xenograft"]),
+  human = subset.PDX(rnaseq, rnaseq$meta[,sample.type=="primary"])
+)
+ 
+rnaseq.subsets <- lapply(rnaseq.subsets, function(ds){
+  ds$meta[,AR.model:=patient %in% model.list$Model]
+  ds$meta <- merge(ds$meta,model.list,sort=F,by.x="patient",by.y="Model",all.x=T)
+  
+  i <- rowSums(cpm(ds$human$data) > 1) >= 3
+  x <- ds$human$data[i,]
+  x <- DGEList(x)
+  x <- calcNormFactors(x)
+  
+  batch <- ds$meta$merged.lanes
+  AR.stat <- ds$meta[,ifelse(is.na(AR.status),"Unknown",AR.status)]
+  #models <- ds$meta[,droplevels(interaction(patient,tissue.sampled))]
+  #models <- ds$meta[,patient]
+  des <- model.matrix(~0+batch+AR.stat)
+  con <- makeContrasts(AR=AR.stat1-AR.stat0,levels=colnames(des))
+  
+  ds$v <- voom(x,design = des)
+  ds$vfit <- contrasts.fit(lmFit(ds$v, des), contrasts=con)
+  ds$efit <- eBayes(ds$vfit)
+  
+  #ds$E.cor <- removeBatchEffect(ds$v$E,design=model.matrix(~0+AR.stat),batch=batch,batch2 = models)
+  ds$E.cor <- removeBatchEffect(ds$v$E,design=model.matrix(~0+AR.stat),batch=batch)
+  
+  ds$gsea <- list( 
+    c6 = GSEA.run(ds$v$E,des,con,Hs.c6),
+    hm = GSEA.run(ds$v$E,des,con,Hs.hm)
+  )
+  
+  return(ds)
+})
+```
+
+# PCA
+
+## All samples
+```{r}
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  x <- pca.run(ds$E.cor,normalise = F,rename = T)
+  x <- cbind(x[,1:3],ds$meta)
+  x[,AR.status:=ifelse(is.na(AR.status),"Unknown",AR.status)]
+  GGally::ggpairs(x,columns = 1:3,mapping = aes(colour=AR.status),title=paste(dsname,"PCA w/ All samples"))
+})
+grid.arrange(grobs=lapply(ps, function(x) grid.grabExpr(print(x))))
+```
+
+
+## AR Tested samples
+```{r}
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  i <- ds$meta[,AR.model==T]
+  x <- pca.run(ds$E.cor[,i],normalise = F,rename = T)
+  x <- cbind(x[,1:3],ds$meta[i])
+  x[,AR.status:=factor(AR.status)]
+  GGally::ggpairs(x,columns = 1:3,mapping = aes(colour=AR.status),title=paste(dsname,"PCA w/ AR tested subset"))
+})
+grid.arrange(grobs=lapply(ps, function(x) grid.grabExpr(print(x))))
+```
+
+
+# AR dist
+
+```{r}
+AR <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=ensembl.human,values="AR")
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  AR <- cbind(ds$meta,"AR"=ds$E.cor[which(AR$ensembl_gene_id == rownames(ds$E.cor)),])
+  (p <- ggplot(AR) + aes(x=AR) + geom_density() + geom_rug(aes(colour=factor(AR.status))) + theme_tufte(20))
+})
+grid.arrange(grobs=ps)
+```
+
+```{R}
+AR <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=ensembl.human,values="AR")
+
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  AR <- cbind(ds$meta,"AR"=ds$E.cor[which(AR$ensembl_gene_id == rownames(ds$E.cor)),])
+  (p <- ggplot(AR) + aes(x=factor(AR.status),y=AR) + geom_boxplot() + theme_tufte(20) + labs(y="AR Expression",x="AR IHC",title=dsname) + scale_x_discrete(labels=c("Negative","Positive","Unknown")))
+})
+grid.arrange(grobs=ps)
+```
+
+```{R}
+AR <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=ensembl.human,values="AR")
+
+ds <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  AR <- cbind(ds$meta,"AR"=ds$E.cor[which(AR$ensembl_gene_id == rownames(ds$E.cor)),])
+  AR[,patient.sample:=as.character(interaction(patient,tissue.sampled))]
+  
+})
+x <- merge(ds[[1]],ds[[2]],by="patient.sample")
+
+ggplot(x) + aes(x=AR.x,AR.y) + geom_point() + labs(x=names(rnaseq.subsets)[1],y=names(rnaseq.subsets)[2],title="AR Expression")
+```
+
+
+# Genelists
+
+```{r}
+fnames <- list.files(paste0(data.dir,"androgen.receptor/"),"*.txt",full.names = T)
+gene.lists <- lapply(fnames, fread,header=F)
+names(gene.lists) <- basename(fnames)
+gene.lists <- rbindlist(gene.lists,idcol = "gene.list")
+gene.lists <- gene.lists[,c(V1,"PARP1","PRKDC"),gene.list]
+gene.lists <- merge(gene.lists,
+                    getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=ensembl.human,values=gene.lists$V1),
+                    by.x="V1",by.y="external_gene_name",sort=F)
+```
+
+## DOANE
+
+```{r}
+gl <- gene.lists[gene.list %in% c("DOANE_down.txt","DOANE_up.txt")]
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  
+  x <- ds$E.cor[match(gl$ensembl_gene_id,rownames(ds$E)),]
+  rownames(x) <- gl$V1
+  x <- x[!is.na(rowSums(x)),]
+
+  i <- ds$meta[,AR.model==T]
+  ann.col <- as.data.frame(ds$meta[i,.(AR.status=factor(AR.status))])
+  rownames(ann.col) <- colnames(x)[i]
+
+  return(pheatmap(t(x[,i]),annotation_row = ann.col,scale = "column",show_colnames = F,main=paste(dsname,"DOANE Genelist"),annotation_names_row =F,silent=T))
+})
+grid.arrange(grobs=lapply(ps,"[[",4))
+```
+
+## GO_AR
+
+```{r}
+gl <- gene.lists[gene.list == "GO_AR.txt"]
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  
+  x <- ds$E.cor[match(gl$ensembl_gene_id,rownames(ds$E)),]
+  rownames(x) <- gl$V1
+  x <- x[!is.na(rowSums(x)),]
+
+  i <- ds$meta[,AR.model==T]
+  ann.col <- as.data.frame(ds$meta[i,.(AR.status=factor(AR.status))])
+  rownames(ann.col) <- colnames(x)[i]
+
+  return(pheatmap(t(x[,i]),annotation_row = ann.col,scale = "column",show_colnames = T,main=paste(dsname,"GO:AR Genelist"),annotation_names_row =F,silent=T,border_color="grey30"))
+})
+grid.arrange(grobs=lapply(ps,"[[",4))
+```
+
+## DE genes
+
+```{r}
+ps <- lapply(names(rnaseq.subsets), function(dsname){
+  ds <- rnaseq.subsets[[dsname]]
+  gl <- topTable.annotated.DE(ds$efit)
+  
+  x <- ds$E.cor[match(gl$ENSEMBL,rownames(ds$E)),]
+  rownames(x) <- gl[,ifelse(is.na(SYMBOL),ENSEMBL,SYMBOL)]
+  x <- x[!is.na(rowSums(x)),]
+
+  i <- ds$meta[,AR.model==T]
+  ann.col <- as.data.frame(ds$meta[i,.(AR.status=factor(AR.status))])
+  rownames(ann.col) <- colnames(x)[i]
+
+  return(pheatmap(t(x[,i]),annotation_row = ann.col,scale = "column",show_colnames = F,main=paste(dsname,"DE Genelist"),annotation_names_row =F,silent=T,border_color="grey30"))
+})
+grid.arrange(grobs=lapply(ps,"[[",4))
+```
+
+```{r}
+x <- lapply(rnaseq.subsets, function(x) topTable.annotated.DE(x$efit))
+gplots::venn(lapply(x,function(y) y[logFC>0,ENSEMBL])) + title("Up.reg")
+gplots::venn(lapply(x,function(y) y[logFC<0,ENSEMBL])) + title("Down.reg")
+(y <- merge(x[[1]],x[[2]],by="ENSEMBL")[direction.x==direction.y])
+```
+
+# GSEA
+
+## c6
+
+```{r}
+x <- lapply(rnaseq.subsets, function(x) x$gsea$c6)
+gplots::venn(lapply(x,function(y) y[Direction=="Up",pathway])) + title("Up.reg")
+gplots::venn(lapply(x,function(y) y[Direction=="Down",pathway])) + title("Down.reg")
+merge(x[[1]],x[[2]],by="pathway")[Direction.x==Direction.y]
+```
+
+## Hallmark
+
+```{r}
+x <- lapply(rnaseq.subsets, function(x) x$gsea$hm)
+gplots::venn(lapply(x,function(y) y[Direction=="Up",pathway])) + title("Up.reg")
+gplots::venn(lapply(x,function(y) y[Direction=="Down",pathway])) + title("Down.reg")
+merge(x[[1]],x[[2]],by="pathway")[Direction.x==Direction.y]
+```

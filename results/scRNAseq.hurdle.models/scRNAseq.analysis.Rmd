@@ -1,0 +1,341 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: scRNAseq Selu Trail
+layout: page
+---
+
+```{r, message=F, warning=F}
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+project.dir <- paste0(root.dir,"PDX/")
+fname <- paste0(project.dir,"data/Rdata.dumps/scRNAseq.selu.Rdata")
+library(MAST)
+
+if(file.exists(fname)){
+  load(fname)
+} else {
+  save(data,file=paste0(project.dir,"results/scRNAseq.shiny.hist/data/scRNAseq.processed.Rdata"))
+  
+  hg19.ensembl <- useEnsembl(biomart='ensembl', dataset='hsapiens_gene_ensembl', GRCh=37)
+  
+  data <- list()
+  data$VHI098 <- fread(paste0(project.dir,"data/scRNAseq/ALL_hg19-SFnorm.tsv"))
+  data$VHI098.resist <- fread(paste0(project.dir,"data/scRNAseq/VHIO98_resist-SFnorm.tsv"))
+  data$HCI009 <- fread(paste0(project.dir,"data/scRNAseq/HCI009-SFnorm.tsv"))
+  datasets <- names(data)
+  
+  data <- lapply(datasets,function(dataset){
+    x <- data[[dataset]]
+    gene_ids <- x[,gsub(gene_id, pattern="hg19_", replacement="")]
+    gene_symbols <- getBM(attributes=c('ensembl_gene_id', 'external_gene_name'),filters='ensembl_gene_id', mart=hg19.ensembl,values=gene_ids)
+  
+    if(dataset=="VHI098"){
+      meta.data <- data.table(Sample=c("SIGAA11", "SIGAC11", "SIGAD11", "SIGAE11", "SIGAF11", "SIGAG11", "SIGAH11"),
+                              Treatment=c("Treated", "Treated", "Treated", "Untreated", "Treated", "Untreated", "Untreated"),
+                              Response=c("Responder", "Resistant", "Resistant", "Untreated", "Responder", "Untreated", "Untreated"))
+    } else if(dataset=="VHI098.resist"){
+      meta.data <- data.table(Sample=c("SIGAA8", "SIGAB8", "SIGAC8", "SIGAD8", "SIGAE8", "SIGAG8"),
+                              Treatment=c("Treated", "Untreated", "Treated", "Untreated", "Treated", "Untreated"))
+    } else if(dataset=="HCI009"){
+      meta.data <- data.table(Sample=c("SIGAA7", "SIGAB7", "SIGAC7", "SIGAD7", "SIGAE7", "SIGAF7", "SIGAG7"),
+                              Treatment=c("Treated", "Untreated", "Untreated", "Untreated", "Untreated", "Treated", "Treated"),
+                              Response=c("Responder", "Untreated", "Untreated", "Untreated", "Untreated", "Responder", "Resistant"))
+    } else { 
+      stop("dataset not recognised")
+    }
+    uber.meta <- data.table(sub.sample=head(colnames(x),-1))
+    uber.meta[,Sample:=tstrsplit(sub.sample,"_")[1]]
+    uber.meta <- merge(uber.meta, meta.data)
+    
+    y <- list()
+    y$meta <- uber.meta
+    y$human <- as.matrix(x[, 1:(dim(x)[2]-1)])
+    rownames(y$human) <- gene_symbols$external_gene_name
+    y
+  })
+  names(data) <- datasets
+  
+  save(data,file=paste0(project.dir,"results/scRNAseq.shiny.hist/data/scRNAseq.processed.Rdata"))
+}
+```
+
+# Simple PCAs to begin
+
+```{r}
+for(i in 1:length(data)){
+  y <- data[[i]]$human
+  pca <- prcomp(t(y[order(-1*apply(y,1,var)),][1:1000,]),scale=T)
+  pca <- cbind(data[[i]]$meta,CDR=colSums(y>0),pca$x)
+  print(ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', 'PC4', 'CDR'),
+          mapping=aes(color=Treatment), upper=list(continuous='cor')))   
+}
+```
+
+The CDR clearly correlates strongle to the either or both the 1st and/or 2nd principal components (PCs). This makes it clear that the CDR should always be considered when performing any modelling. Let's us see the propotion of variance accounted for by these first PCs. 
+
+```{r}
+lapply(data,function(x){
+  y <- x$human
+  pca <- prcomp(t(y[order(-1*apply(y,1,var)),][1:1000,]),scale=T)
+  eigs <- pca$sdev^2
+  rbind("Prop. of Var."=eigs[1:5] / sum(eigs),"Cum. Sum. Prop. of Var."=cumsum(eigs[1:5])/sum(eigs))
+})
+```
+
+
+
+```{r}
+for(i in 1:length(data)){
+  y <- cbind(data[[i]]$meta,CDR=colSums(data[[i]]$human > 0))
+  if("Response" %in% names(y)){
+    print(ggplot(y) + aes(x=Response,y=CDR,fill=Response,group=Sample) + geom_violin(draw_quantiles = c(.25,.5,.75)))
+  } else {
+    print(ggplot(y) + aes(x=Treatment,y=CDR,fill=Treatment,group=Sample) + geom_violin(draw_quantiles = c(.25,.5,.75)))
+  }
+}
+```
+
+It is clear that the CDR has been driving a lot of our observations. Whether this is biological is seperate question, but regardless we should include it in our modelling attempts. Let us perform the DE analysis using edgeR, as done by Mike, but this time including the CDR.
+
+# DE Analysis
+
+## Niave Model (no CDR)
+
+This is the orginal model used by Mike. For this initial test, we will only use the VHIO098 dataset. For reference, Mike's analysis returned:
+
+TreatmentTreated vs. TreatmentUntreated
+-1	1398
+0	9854
+1	2210
+
+```{r}
+design.mat <- model.matrix(~ 0 + Treatment + Sample, data=data$VHI098$meta)
+contrast.mat <-  makeContrasts(TreatmentTreated-TreatmentUntreated, levels=design.mat)
+vfit <- lmFit(data$VHI098$human, design.mat)
+vfit <- contrasts.fit(vfit, contrasts=contrast.mat)
+efit <- eBayes(vfit)
+DE <- as.data.table(topTable(efit,p.value = 0.05, n=Inf),keep.rownames=TRUE)
+DE[,direction:=factor(logFC>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+
+models <- list()
+models$niave <- DE
+
+DE[,.N,direction]
+```
+ 
+As expected, this is the same as what Mike obtained.
+
+## Niave model with CDR
+
+Let's first look at the relative AICs when adding this factor.
+
+```{r}
+aic <- with(cbind(data$VHI098$meta,CDR=colSums(data$VHI098$human>0)),
+            selectModel(data$VHI098$human, list(
+              model.matrix(~ 0 + Treatment + Sample),
+              model.matrix(~ 0 + Treatment + Sample + CDR)
+            ), criterion="aic"))
+table(aic$pref)
+table(exp(as.numeric(diff(t(aic$IC[aic$pref=="2",])))/2) < 0.05) #FDR correction needed?
+```
+
+The AIC shows that the majority of genes are fitted better by the model that incorporates the CDR. Furthermore, the propabilities that this model is an improvement for this "subset" leaves no doubts as to using it.
+
+```{r}
+design.mat <- model.matrix(~ 0 + Treatment + Sample + CDR,
+                           data=cbind(data$VHI098$meta,CDR=colSums(data$VHI098$human>0)))
+contrast.mat <-  makeContrasts(TreatmentTreated-TreatmentUntreated, levels=design.mat)
+vfit <- lmFit(data$VHI098$human, design.mat)
+vfit <- contrasts.fit(vfit, contrasts=contrast.mat)
+efit <- eBayes(vfit)
+DE <- as.data.table(topTable(efit,p.value = 0.05, n=Inf),keep.rownames=TRUE)
+DE[,direction:=factor(logFC>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+models$niave.CDR <- DE
+DE[,.N,direction]
+```
+
+We see a large reduction in the number of up.reg genes which is not quite matched matched by an increase in the number of down.reg genes. In total, the extra coeffienct reduces the total number of DE genes by roughly 600. This is a good indication that it should be included in the model, as the number of samples is such that are we are fairly safe from overfitting. What is the overlap between these models?
+
+```{r}
+x <- merge(models$niave[,.(rn,ID,niave=direction)],
+      models$niave.CDR[,.(rn,ID,niave.CDR=direction)],
+      by=c("rn","ID"),all=TRUE,)
+levels(x$niave) <- c(-1,1,0)
+levels(x$niave.CDR) <- c(-1,1,0)
+x[is.na(x)] <- 0
+vennDiagram(x[,.(niave,niave.CDR)],cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(x[,.(niave,niave.CDR)],cex=0.8,include="down",main="Down.reg.DE")
+```
+
+## Logistic Model
+
+For this model, let us model the expression as either on (!=0) or off (==0). Then let's use logistic regression to model the treatment effect. 
+
+```{r}
+data.binary <- as.data.table(data$VHI098$human != 0)
+data.binary[,row.id:=.I]
+DE <- with(data$VHI098$meta,
+     data.binary[, as.list(summary(glm(unlist(.SD)~Treatment+Sample+cdr))$coefficients[2,]), row.id]
+     )
+DE$row.id <- rownames(data$VHI098$human)
+DE[,fdr:=p.adjust(`Pr(>|t|)`, 'fdr')]
+DE <- DE[fdr<0.05]
+DE[,direction:=factor(Estimate>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+models$logistic <- DE
+DE[,.N,direction]
+```
+
+## Zero-inflated model
+
+We need to first determine an appropiate threshold to below which we set the value to zero.
+
+```{r}
+thres <- thresholdSCRNACountMatrix(data$VHI098$human, nbins = 20, min_per_bin = 30)
+par(mfrow=c(5,4))
+print(plot(thres))
+```
+
+Mike's normalisation has apparently already done this and at all median expression binnings, the threshold is reported as zero.
+
+```{r}
+expMat <- as.matrix(data$VHI098$human)
+rownames(expMat) <- make.names(rownames(expMat),unique = T)
+cData <- as.data.frame(cbind(data$VHI098$meta,CDR=colSums(data$VHI098$human>0)))
+rownames(cData) <- colnames(expMat)
+cData$Treatment <- factor(cData$Treatment,levels = c("Untreated","Treated"))
+fData <- data.frame(gene=rownames(expMat))
+rownames(fData) <- rownames(expMat)
+x <- FromMatrix(expMat,cData,fData)
+
+y <- zlm(~ Treatment + Sample + CDR, x)
+z <- summary(y,doLRT="TreatmentTreated")
+z <- z$datatable
+```
+
+```{r}
+DE <- merge(
+  z[contrast=='TreatmentTreated' & component=='H',.(primerid, `Pr(>Chisq)`)],
+  z[contrast=='TreatmentTreated' & component=='logFC', .(primerid, coef, ci.hi, ci.lo)],
+by='primerid')
+DE[,fdr:=p.adjust(`Pr(>Chisq)`, 'fdr')]
+DE <- DE[fdr<0.05]
+DE[,direction:=factor(coef>0)]
+levels(DE$direction) <- c("down.reg","up.reg")
+models$zero.inf <- DE
+DE[,.N,direction]
+```
+
+Note that the above model calls something as DE if the hurdle (gene being on or off) is signifgantly altered w.r.t. to the contrast tested. There does not have to be a change in the expression of genes that are "on".
+
+What is the overlap w.r.t. the other models?
+
+```{r}
+x <- merge(models$niave[,.(rn,ID,niave=direction)],
+      models$niave.CDR[,.(rn,ID,niave.CDR=direction)],
+      by=c("rn","ID"),all=TRUE,)
+x <- merge(x,
+           models$zero.inf[,.(primerid,zero.inf=direction)],
+           by.x=c("ID"),by.y=c("primerid"),all=TRUE)
+x <- merge(x,
+           models$logistic[,.(row.id,logistic=direction)],
+           by.x=c("ID"),by.y=c("row.id"),all=TRUE)
+levels(x$niave) <- c(-1,1,0)
+levels(x$niave.CDR) <- c(-1,1,0)
+levels(x$zero.inf) <- c(-1,1,0)
+levels(x$logistic) <- c(-1,1,0)
+x[is.na(x)] <- 0
+vennDiagram(x[,.(niave,niave.CDR,zero.inf,logistic)],cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(x[,.(niave,niave.CDR,zero.inf,logistic)],cex=0.8,include="down",main="Down.reg.DE")
+```
+
+And let's see what happends when we enforce a LFC threshold.
+
+```{r}
+x <- merge(models$niave[abs(logFC)>.5,.(rn,ID,niave=direction)],
+      models$niave.CDR[abs(logFC)>.5,.(rn,ID,niave.CDR=direction)],
+      by=c("rn","ID"),all=TRUE,)
+x <- merge(x,
+           models$zero.inf[abs(coef)>.5,.(primerid,zero.inf=direction)],
+           by.x=c("ID"),by.y=c("primerid"),all=TRUE)
+levels(x$niave) <- c(-1,1,0)
+levels(x$niave.CDR) <- c(-1,1,0)
+levels(x$zero.inf) <- c(-1,1,0)
+x[is.na(x)] <- 0
+vennDiagram(x[,.(niave,niave.CDR,zero.inf)],cex=0.8,include="up",main="Up.reg.DE")
+vennDiagram(x[,.(niave,niave.CDR,zero.inf)],cex=0.8,include="down",main="Down.reg.DE")
+```
+
+#DE genes plots
+
+Finally, let's make a few pretty plots of the most DE genes for each model.
+
+## Niave model
+
+```{r}
+DE <- models$niave
+i <- which(rownames(data$VHI098$human) %in% DE[order(adj.P.Val)][abs(logFC)>.5][1:16,ID])
+x <- merge(melt(data$VHI098$human[i,]),data$VHI098$meta,by.x=c("Var2"),by.y=c("sub.sample"))
+ggplot(x) + aes(x=Treatment,y=value,group=Sample,fill=Treatment) + geom_violin(draw_quantiles = c(.5)) + facet_wrap(~Var1,scale='free_y')
+```
+
+```{r}
+DE <- models$niave
+i <- which(rownames(data$VHI098$human) %in% DE[order(adj.P.Val)][abs(logFC)>.5][1:50,ID])
+j <- data$VHI098$meta[,order(Treatment)]
+labels.col <- rep("",length(i))
+ann.col <- as.data.frame(data$VHI098$meta[j,.(Sample,Treatment)])
+rownames(ann.col) <- data$VHI098$meta[j,sub.sample]
+pheatmap(data$VHI098$human[i,j],labels_col=labels.col,annotation_col = ann.col,cluster_cols = F)
+```
+
+## Niave CDR model
+
+```{r}
+DE <- models$niave.CDR
+i <- which(rownames(data$VHI098$human) %in% DE[order(adj.P.Val)][abs(logFC)>.5][1:16,ID])
+x <- merge(melt(data$VHI098$human[i,]),data$VHI098$meta,by.x=c("Var2"),by.y=c("sub.sample"))
+ggplot(x) + aes(x=Treatment,y=value,group=Sample,fill=Treatment) + geom_violin(draw_quantiles = c(.5)) + facet_wrap(~Var1,scale='free_y')
+```
+
+```{r}
+DE <- models$niave.CDR
+i <- which(rownames(data$VHI098$human) %in% DE[order(adj.P.Val)][abs(logFC)>.5][1:50,ID])
+j <- data$VHI098$meta[,order(Treatment)]
+labels.col <- rep("",length(i))
+ann.col <- as.data.frame(data$VHI098$meta[j,.(Sample,Treatment)])
+rownames(ann.col) <- data$VHI098$meta[j,sub.sample]
+pheatmap(data$VHI098$human[i,j],labels_col=labels.col,annotation_col = ann.col,cluster_cols = F)
+```
+
+## Zero-inflated model
+
+```{r}
+DE <- models$zero.inf
+i <- which(rownames(data$VHI098$human) %in% DE[order(fdr)][abs(coef)>.5][1:16,primerid])
+x <- merge(melt(data$VHI098$human[i,]),data$VHI098$meta,by.x=c("Var2"),by.y=c("sub.sample"))
+ggplot(x) + aes(x=Treatment,y=value,group=Sample,fill=Treatment) + geom_violin(draw_quantiles = c(.5)) + facet_wrap(~Var1,scale='free_y')
+```
+
+```{r}
+DE <- models$zero.inf
+i <- which(rownames(data$VHI098$human) %in% DE[order(fdr)][abs(coef)>.5][1:50,primerid])
+j <- data$VHI098$meta[,order(Treatment)]
+labels.col <- rep("",length(i))
+ann.col <- as.data.frame(data$VHI098$meta[j,.(Sample,Treatment)])
+rownames(ann.col) <- data$VHI098$meta[j,sub.sample]
+pheatmap(data$VHI098$human[i,j],labels_col=labels.col,annotation_col = ann.col,cluster_cols = F)
+```

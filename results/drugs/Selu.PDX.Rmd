@@ -1,0 +1,663 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Selu
+layout: page
+---
+
+# Load libraries and data
+```{r, message=F, warning=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+
+rnaseq <- get.PDX()
+meta <- load.meta()
+
+meta <- subset.meta(meta,meta[,project=="drug.selu"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+# QC
+
+```{r,fig.width=12,fig.height=6}
+read.depth.plots(rnaseq$meta)
+```
+
+We should remove the runs that contain very few reads before we merge otherwise they could bias the subsequent analysis. 
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,human.library.size>1E6])
+```
+
+Repeat QC plots:
+
+```{r,fig.width=12,fig.height=6}
+read.depth.plots(rnaseq$meta)
+```
+
+```{r}
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+unique(rnaseq$meta[,.(merged.lanes,as.numeric(as.factor(merged.lanes)))])
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+What samples remain after all that QC:
+
+```{r}
+table(unique(rnaseq$meta[,.(PDX,Treatment,Mouse)])[,.(PDX,Treatment)])
+```
+
+Note that the VHIO098 samples contain duplicates (as noted by mice numbers).
+
+```{r}
+rnaseq$meta[,.N,.(Mouse,PDX,Treatment)][N>1]
+```
+
+Let's use these duplicates to see if the assignment of human and mouse reads suffered by reducing to SE50 sequencing 
+Note: merged.lane==1 --> SLX-14082; which is SE50)
+
+```{r}
+x <- rnaseq$meta[Mouse %in% rnaseq$meta[,.N,.(Mouse,PDX,Treatment)][N>1,Mouse]][order(Mouse),.(Sample.name,Mouse,merged.lanes,mouse.library.size/(mouse.library.size+human.library.size))]
+ggplot(x) + aes(x=Mouse,y=V4,colour=factor(merged.lanes)) + geom_point(size=5) + theme_wsj() + coord_flip()
+```
+
+There does not appear to be a signifgant change in the mouse fraction due to sequencing. However, lane 4 that which contains all the duplicates (news!), has consistantly lower amounts of mouse. I do not know why all the duplicates are found within SLX-14906. Are all of SLX-14906 duplicates?
+
+```{r}
+rnaseq$meta[Mouse %in% rnaseq$meta[merged.lanes==4,Mouse]][order(Mouse),.(Sample.name,merged.lanes,Treatment,Processing.batch)]
+```
+
+There appears to be duplication depending on the "processing batch". I need to confirm with Dimitra what exactly this was in reference to and, potentially, fill in the "NAs". The meta data would suggest that all the "NAs" should be 1.
+
+---> After talking to Dim, I can confirm that all of SLX-14906 consisted of samples processed in a different manner to the rest. For ease, let us remove these samples from the analysis.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta$merged.lanes!=4)
+```
+
+Let us check again the mouse fractions w.r.t. all sequencing runs. 
+
+```{r}
+ggplot(rnaseq$meta[,.(mouse.library.size/(mouse.library.size+human.library.size),merged.lanes)]) + aes(x=factor(merged.lanes), fill = factor(merged.lanes), y = V1) + geom_boxplot() + geom_jitter(width=0.1)
+```
+
+Both of the above indicate that we have not lost sensitivity in reducing the our read lengths.
+
+
+# Cellularity changes
+
+Let's just see whether there is a difference in the PDXs cellularity as we saw changes with the Olaparib drug treatment.
+
+```{r}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","PDX","Treatment"),measure.vars = c("mouse.library.size","human.library.size"))
+x[,value:=value/sum(value),Sample.name]
+ggplot(x[variable=="mouse.library.size"]) + aes(x=Treatment,y=value,fill=Treatment) + geom_boxplot() + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_wrap(~PDX,scales = "free_y")
+```
+
+There does not appear to be a systematic change in the cellularity with treatment. Note that selu is a far more targeted therapy than olap, and hence may not change the stroma-tumor fractions as much.
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$human)
+pca <- cbind(rnaseq$meta,pca)
+pca$merged.lanes <- factor(pca$merged.lanes)
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=PDX), upper=list(continuous='cor'))
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=Treatment), upper=list(continuous='cor'))
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=merged.lanes), upper=list(continuous='cor'))  
+```
+
+There appears a large batch effect associated with the sequencing. Outwith of that there is also some grouping based on pdx type, while nothing notable with regards to treatment.
+
+```{r}
+rnaseq$meta[,.N,.(merged.lanes,PDX,Treatment)][order(merged.lanes)]
+```
+
+Let us repeat both the above PCAs using batch correction to account for the sequencing.
+
+```{r}
+pca <- pca.prep(rnaseq$human)
+pca <- with(rnaseq$meta,removeBatchEffect(pca,design = model.matrix(~ PDX + Treatment),batch = merged.lanes))
+pca <- prcomp(t(pca),scale=T)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+pca$merged.lanes <- factor(pca$merged.lanes)
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=PDX), upper=list(continuous='cor'))
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=Treatment), upper=list(continuous='cor'))
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=merged.lanes), upper=list(continuous='cor'))  
+```
+
+Given the construction of the meta data, it's hard to remove the effect of the sequencing from the variables of interest. As such, we get only a small reduction in the sequencing dominating the variablility.
+
+Let's plot the different PDX arms individually.
+
+```{r}
+for(pdx in unique(rnaseq$meta$PDX)){
+  x <- subset.PDX(rnaseq, rnaseq$meta[,pdx == PDX])
+  pca <- pca.run(x$human)
+  pca <- cbind(x$meta,pca)
+  pca$merged.lanes <- factor(pca$merged.lanes)
+  print(ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=Treatment,shape=merged.lanes), upper=list(continuous='cor'))  + ggtitle(pdx))
+}
+```
+
+
+We are buggered by the sequencing.... :(
+
+Since its not obvious by the grouping, what the unknown sample is from, I will remove it.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta$Treatment!="Unknown")
+```
+
+# Key questions
+
+* Genes of interest: EGFR, apoptotic genes (bcl2, mcl1, bax)
+* Are there any systematic differences between the control and treated groups?
+* Are there any traits/markers that define the speed with which resistance is devloped in the treated groups?
+* Is resistance developed in different manners between the treated samples?
+
+# Model: ~ drug + pdx
+
+## All data
+
+```{r}
+sequencing <- rnaseq$meta[,factor(merged.lanes)]
+treatment <- rnaseq$meta[,Treatment]
+pdx <- rnaseq$meta[,PDX]
+d <- model.matrix(~ 0 + treatment + pdx + sequencing)
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Selu.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(rnaseq$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+# ssGSEA
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  y <- removeBatchEffect(ssGSEA.data$w[i,],design = model.matrix(~drug), batch=pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+The lack of any results is unsuprising as this statistical model is the most simplistic; not presuming that different models react differently to the drug, espcially with a resistant model included, is foolish. Also, the sequencing is dominating all the variability.
+
+### Genes of Interest
+
+These genes were found in the scRNAseq data to be notable:
+
+
+```{r}
+genes <- c("KLF4", "IRF1", "NFKBIA","CDKN1A","CEBPD","MAP3K8","EFNA1")
+ids <- mapIds(org.Hs.eg.db,keys=genes,keytype = "SYMBOL",column = "ENSEMBL", multiVals = "first")
+y <- DE.data$v$E[match(ids,rownames(DE.data$v)),]
+rownames(y) <- genes
+y <- removeBatchEffect(y,design = model.matrix(~treatment), batch=pdx, batch2 = sequencing)
+
+for(i in 1:length(ids)){
+  x <- y[i,]
+  stripchart(x~treatment*pdx,vertical=TRUE,las=2,cex.axis=0.8,pch=16,col=1:2,method="jitter",main=genes[i])
+}
+```
+
+Shifts of mean w.r.t. PDX models
+
+```{r}
+x <- apply(y,1,function(x) as.numeric(by(x,interaction(treatment,pdx),mean)))
+x <- x[seq(1,by=2,length.out = length(unique(pdx))),] - x[seq(2,by=2,length.out = length(unique(pdx))),]
+rownames(x) <- sort(unique(pdx))
+x <- as.data.table(melt(x))
+ggplot(x) + aes(x=Var1,y=value) + geom_col() + facet_wrap(~Var2) + theme(axis.text.x = element_text(angle = 90))
+```
+
+Repeat above with median (less affected by outliers)
+
+```{r}
+x <- apply(y,1,function(x) as.numeric(by(x,interaction(treatment,pdx),median)))
+x <- x[seq(1,by=2,length.out = length(unique(pdx))),] - x[seq(2,by=2,length.out = length(unique(pdx))),]
+rownames(x) <- sort(unique(pdx))
+x <- as.data.table(melt(x))
+ggplot(x) + aes(x=Var1,y=value) + geom_col() + facet_wrap(~Var2) + theme(axis.text.x = element_text(angle = 90))
+```
+
+### Pathways of interest
+
+Let us also check the LEF1 signature, which showed a response in the scRNA-seq data between response and resistence samples; a comparison we can't perform due to sample numbers.
+
+```{r}
+pathways <- c("LEF1_UP.V1_UP", "SNF5_DN.V1_UP", "MEK_UP.V1_DN")
+y <- ssGSEA.data$w[match(pathways,rownames(ssGSEA.data$w)),]
+y <- removeBatchEffect(y,design = model.matrix(~treatment), batch=pdx, batch2 = sequencing)
+for(i in 1:length(pathways)){
+  x <- y[i,]
+  stripchart(x~treatment*pdx,vertical=TRUE,las=2,cex.axis=0.8,pch=16,col=1:2,method="jitter",main=pathways[i])
+}
+```
+
+
+Shifts of mean w.r.t. PDX models
+
+```{r}
+x <- apply(y,1,function(x) as.numeric(by(x,interaction(treatment,pdx),mean)))
+x <- x[seq(1,by=2,length.out = length(unique(pdx))),] - x[seq(2,by=2,length.out = length(unique(pdx))),]
+rownames(x) <- sort(unique(pdx))
+x <- as.data.table(melt(x))
+ggplot(x) + aes(x=Var1,y=value) + geom_col() + facet_wrap(~Var2) + theme(axis.text.x = element_text(angle = 90))
+```
+
+Repeat above with median (less affected by outliers)
+
+```{r}
+x <- apply(y,1,function(x) as.numeric(by(x,interaction(treatment,pdx),median)))
+x <- x[seq(1,by=2,length.out = length(unique(pdx))),] - x[seq(2,by=2,length.out = length(unique(pdx))),]
+rownames(x) <- sort(unique(pdx))
+x <- as.data.table(melt(x))
+ggplot(x) + aes(x=Var1,y=value) + geom_col() + facet_wrap(~Var2) + theme(axis.text.x = element_text(angle = 90))
+```
+
+# Model: ~ drug:pdx
+
+```{r}
+sequencing <- rnaseq$meta[,factor(merged.lanes)]
+treatment <- rnaseq$meta[,Treatment]
+pdx <- rnaseq$meta[,PDX]
+
+d <- model.matrix(~ 0 + sequencing + treatment:pdx)
+d <- d[,colSums(d)!=0]
+d <- d[,!(colnames(d) %in% c("sequencing3"))]
+
+c <- matrix(0,dim(d)[2],length(unique(pdx)))
+c[cbind(seq(1,by=2,length.out=length(unique(pdx))) + (length(levels(sequencing))-1),1:length(unique(pdx)))] <- 1
+c[cbind(seq(2,by=2,length.out=length(unique(pdx))) + (length(levels(sequencing))-1),1:length(unique(pdx)))] <- -1
+colnames(c) <- paste(sort(unique(pdx)),"Selu.minus.control",sep=":")
+rownames(c) <- colnames(d)
+c
+
+DE.data <- DE.run(rnaseq$human,d,2,cont.matrix = c)
+
+#Table of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.05)
+DE
+
+#VennDiagrms of DE genes
+if(nrow(DE)!=0) vennDiagram.paired(DE[,2:6])
+```
+
+# VHIO098
+## Only VHIO098-naive (Model: ~ drug)
+
+```{r}
+VHI <- subset.PDX(rnaseq,rnaseq$meta[,PDX=="VHIO098" & Treatment!="Unknown"])
+treatment <- VHI$meta[,Treatment]
+sequencing <- VHI$meta[,factor(merged.lanes)]
+#d <- model.matrix(~ 0 + treatment + sequencing)
+d <- model.matrix(~ 0 + treatment) #<- Bad Ali
+
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Selu.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(VHI$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.5)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#ssGSEA - c6
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+}
+
+if(nrow(ssGSEA)>1){
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  labels.col <- rep("",nrow(VHI$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(VHI$meta[,.(treatment)])
+  rownames(ann.col) <- VHI$meta[,Sample.name]
+  pheatmap(ssGSEA.data$w[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+## Only VHIO098OR (Model: ~ drug)
+
+```{r}
+VHIO.OR <- subset.PDX(rnaseq,rnaseq$meta[,PDX=="VHIO098OR"])
+treatment <- VHIO.OR$meta[,Treatment]
+d <- model.matrix(~ 0 + treatment)
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Selu.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(VHIO.OR$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(VHIO.OR$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(VHIO.OR$meta[,.(pdx,drug)])
+  rownames(ann.col) <- VHIO.OR$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#ssGSEA - c6
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+}
+
+if(nrow(ssGSEA)>1){
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  labels.col <- rep("",nrow(VHIO.OR$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(HCI$meta[,.(treatment)])
+  rownames(ann.col) <- HCI$meta[,Sample.name]
+  pheatmap(ssGSEA.data$w[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+## Only VHIO098 (w/ Selu) (Model: ~ PDX)
+
+```{r}
+VHIO.OR <- subset.PDX(rnaseq,rnaseq$meta[,PDX %in% c("VHIO098","VHIO098OR") & Treatment=="Selumetinib" & merged.lanes==1])
+model <- VHIO.OR$meta[,PDX]
+d <- model.matrix(~ 0 + model)
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("OR.minus.Naive")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(VHIO.OR$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- DE.data$v$E[i,]
+  labels.col <- rep("",nrow(VHIO.OR$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(VHIO.OR$meta[,.(PDX)])
+  rownames(ann.col) <- VHIO.OR$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#ssGSEA - c6
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+}
+
+if(nrow(ssGSEA)>1){
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  labels.col <- rep("",nrow(VHIO.OR$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(HCI$meta[,.(treatment)])
+  rownames(ann.col) <- HCI$meta[,Sample.name]
+  pheatmap(ssGSEA.data$w[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+# Other models
+
+## Only STG139 (Model: ~ drug)
+
+```{r}
+STG139 <- subset.PDX(rnaseq,rnaseq$meta[,PDX=="STG139" & merged.lanes==1])
+treatment <- STG139$meta[,Treatment]
+d <- model.matrix(~ 0 + treatment)
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Selu.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(STG139$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(STG139$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(STG139$meta[,.(pdx,drug)])
+  rownames(ann.col) <- STG139$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#ssGSEA - c6
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+}
+
+if(nrow(ssGSEA)>1){
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  labels.col <- rep("",nrow(STG139$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(HCI$meta[,.(treatment)])
+  rownames(ann.col) <- HCI$meta[,Sample.name]
+  pheatmap(ssGSEA.data$w[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+## Only HCI009 (Model: ~ drug)
+
+```{r}
+HCI <- subset.PDX(rnaseq,rnaseq$meta[,PDX=="HCI009"])
+treatment <- HCI$meta[,Treatment]
+sequencing <- HCI$meta[,factor(merged.lanes)]
+d <- model.matrix(~ 0 + treatment + sequencing)
+
+cont.matrix <- matrix(c(1,-1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+colnames(cont.matrix) <- c("Selu.minus.control")
+rownames(cont.matrix) <- colnames(d)
+cont.matrix
+
+#Perform DE
+DE.data <- DE.run(HCI$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  table(DE[,direction])
+  DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+  DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)]
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~drug), batch= pdx)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(rnaseq$meta[,.(pdx,drug)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix[,1],Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#ssGSEA - c6
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c6,d,cont.matrix=cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)]
+  ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)]
+}
+
+if(nrow(ssGSEA)>1){
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  labels.col <- rep("",nrow(HCI$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(HCI$meta[,.(treatment)])
+  rownames(ann.col) <- HCI$meta[,Sample.name]
+  pheatmap(ssGSEA.data$w[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+

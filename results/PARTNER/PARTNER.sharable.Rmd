@@ -1,0 +1,594 @@
+---
+title: 'PDX: PAR1040'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+layout: page
+---
+
+#Load libraries and data
+
+```{r}
+load("~/OneDrive/projects/PDX/results/PARTNER/myEnviroment.2.RData") #point this to RData object
+project.dir <- "~/OneDrive/projects/PDX/results/PARTNER/" #make this your folder
+```
+
+```{r}
+pca.human <- pca.run(rnaseq$human$data,rename = T)
+pca.human <- cbind(pca.human,rnaseq$meta)
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(Cohort),shape=factor(project)),title="Coloured by cohort")
+```
+
+The two pdx models seperate cleanly, with this defining the majority of the variation.
+
+```{r}
+rnaseq$meta[,.N,.(project,Cohort,Sampling)][order(Cohort,project)]
+```
+
+I dislike testing the midpoints (T) due to lack of replicates. Let's focus on the post-treated samples.
+
+```{r}
+PAR1040 <- subset.PDX(rnaseq,rnaseq$meta[,project=="PAR1040"])
+PAR1006 <- subset.PDX(rnaseq,rnaseq$meta[,project=="PAR1006"])
+```
+
+# PAR1040
+
+## PCAs w.r.t. batch
+
+```{r}
+pca.human <- pca.run(PAR1040$human$data,rename = T)
+pca.human <- cbind(pca.human,PAR1040$meta)
+
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(Cohort)),title="Coloured by cohort")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=cut(mouse.library.size/(human.library.size+mouse.library.size),quantile(mouse.library.size/(human.library.size+mouse.library.size)))),title="Coloured by mouse fraction")
+```
+
+## PCAs w.r.t cohort
+
+```{r}
+for(coh in unique(PAR1040$meta[,Cohort])){
+  x <- subset.PDX(PAR1040, PAR1040$meta[,Cohort %in% c(coh,"Untreated")])
+  pca.human <- pca.run(x$human$data,rename = T)
+  pca.human <- cbind(pca.human,x$meta)
+  print(suppressWarnings(ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(Cohort),shape=factor(Sampling)),title=paste0(coh,": Coloured by cohort"))))
+}
+```
+
+## Model: ~ 0 + cohort
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1040/")
+invisible(lapply(grep("dir$",ls(),value = T), function(dname) dir.create(eval(as.name(dname)),recursive = T,showWarnings = F)))
+
+x <- subset.PDX(PAR1040, PAR1040$meta[,Cohort %in% c("Untreated","Olaparib","AZD1775","Olap.AZD1775") & Sampling=="PT"])
+cohort <- droplevels(x$meta[,Cohort])
+d <- model.matrix(~ 0 + cohort)
+
+n <- length(levels(cohort)) - 1
+cont <- rbind(-1,diag(n))
+colnames(cont) <- levels(cohort)[-1]
+rownames(cont) <- colnames(d)
+cont
+
+DE.data <- DE.run(x$human$data,d,cont.matrix=cont)
+
+#Tables of DE genes
+for(i in 1:n){
+  DE <- topTable.annotated.DE(DE.data$efit,coef = i)
+  fwrite(DE,paste0(results.dir,"DE.genes.",colnames(cont)[i],".csv"))
+}
+
+#Overlap of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.05)
+fwrite(DE[.N:1],paste0(results.dir,"DE.genes.combined.csv"))
+
+#Overlap plot
+if(nrow(DE)){
+  x <- rbind(
+    cbind(DE[,ifelse(.SD[,2:(n+1)]>0,1,0)],data.table(reg="UP")),
+    cbind(DE[,ifelse(.SD[,2:(n+1)]<0,1,0)],data.table(reg="DOWN"))
+  )
+  p <- upset(
+    x,
+    queries = list(list(query=elements,params=list("reg","UP"),color="red",active=T)),
+    order.by = "freq",
+    nsets = n,
+    nintersects = 20
+  )
+  png(paste0(results.dir,"DE.genes.combined.png"),width = 1500,height = 1000,res=300)
+  p
+  dev.off()
+}
+
+#Gene set 
+x <- lapply(1:n,function(i) GSEA.run(DE.data$v,d,cont[,i],hm.gs,0.05,igc=0.05))
+names(x) <- colnames(cont)
+for(i in 1:n) fwrite(x[[i]],paste0(results.dir,"GSEA.hallmark.",colnames(cont)[i],".csv"))
+
+#Gene set overlap
+x <- rbindlist(x,idcol = "contrast")
+x[,rank:=1:.N,contrast]
+x <-  rbind(
+  cbind(dcast(x[Direction=="Up"],pathway~contrast,value.var = "rank"),data.table(reg="Up")),
+  cbind(dcast(x[Direction=="Down"],pathway~contrast,value.var = "rank"),data.table(reg="Down")),
+  fill=TRUE
+)
+x <- cbind(x[,-grep("reg",colnames(x)),with=F],x[,.(reg)])
+x[,avg.rank:=rowMeans(.SD[,2:(ncol(x)-1)],na.rm = T)]
+fwrite(x[order(avg.rank)],paste0(results.dir,"GSEA.hallmark.combined.csv"))
+
+#Overlap plot
+x <- cbind(x[,.(reg)],x[,ifelse(!is.na(.SD[,2:(ncol(x)-2)]),1,0)])
+p <- upset(x, queries = list(list(query=elements,params=list("reg","Up"),color="red",active=T)), order.by = "freq",  nsets = n)
+png(paste0(results.dir,"GSEA.hallmark.combined.png"),width = 1500,height = 1000,res=300)
+p
+dev.off()
+
+
+# scRNAseq cluster markers vs biobank
+x <- lapply(1:n,function(i) GSEA.run(DE.data$v,d,cont[,i],scRNAseq.genes.par1040,0.05,igc=0.05))
+names(x) <- colnames(cont)
+
+for(i in 1:n) fwrite(x[[i]],paste0(results.dir,"GSEA.scRNAseq.",colnames(cont)[i],".csv"))
+
+#Gene set overlap
+x <- rbindlist(x,idcol = "contrast")
+x[,rank:=1:.N,contrast]
+x <-  rbind(
+  cbind(dcast(x[Direction=="Up"],pathway~contrast,value.var = "rank"),data.table(reg="Up")),
+  cbind(dcast(x[Direction=="Down"],pathway~contrast,value.var = "rank"),data.table(reg="Down")),
+  fill=TRUE
+)
+x <- cbind(x[,-grep("reg",colnames(x)),with=F],x[,.(reg)])
+x[,avg.rank:=rowMeans(.SD[,2:(ncol(x)-1)],na.rm = T)]
+fwrite(x[order(avg.rank)],paste0(results.dir,"GSEA.scRNAseq.combined.csv"))
+
+#Overlap plot
+x <- cbind(x[,.(reg)],x[,ifelse(!is.na(.SD[,2:(ncol(x)-2)]),1,0)])
+p <- upset(x, queries = list(list(query=elements,params=list("reg","Up"),color="red",active=T)), order.by = "freq",  nsets = n)
+png(paste0(results.dir,"GSEA.scRNAseq.combined.png"),width = 1500,height = 1000,res=300)
+p
+dev.off()
+```
+
+
+## Heatmaps
+
+### Olap
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1040/")
+
+x <- subset.PDX(PAR1040,PAR1040$meta$Cohort %in% c("Untreated","Olaparib"))
+y <- norm.count.matrix(x$human$data,0.5,colSums(x$human$data))
+colnames(y) <- x$meta$Mouse
+ann.col <- data.frame(x$meta[,.(Cohort,Sampling)])
+rownames(ann.col) <- colnames(y)
+
+# logFC gene 
+a <- rowMeans(y[,x$meta[,which(Cohort=="Olaparib" & Sampling=="T")]])
+b <- rowMeans(y[,x$meta[,which(Cohort=="Untreated")]])
+gl <- names(sort(-abs(a-b))[1:50])
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[!duplicated(ENSEMBL)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"LFC.treated.genes.Olaparib.heatmap.png"))
+
+# DE gene 
+fname <- paste0(results.dir,"DE.genes.Olaparib.csv")
+if(file.exists(fname) & nrow(fread(fname))>0){
+  gl <- fread(fname)
+  gl <- head(gl,50)
+  z <- y[match(gl$ENSEMBL,rownames(y)),]
+  rownames(z) <- gl[,ifelse(nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+  pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T, filename = paste0(results.dir,"DE.genes.Olaparib.heatmap.png"))
+}
+
+# HALLMARK DNA REPAIR
+gl <- hm.gs$HALLMARK_DNA_REPAIR
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.DNA.genes.Olaparib.heatmap.png"),show_rownames = F)
+
+# HALLMARK EMT
+gl <- hm.gs$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.EMT.genes.Olaparib.heatmap.png"),show_rownames = F)
+```
+
+
+### AZD
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1040/")
+
+x <- subset.PDX(PAR1040,PAR1040$meta$Cohort %in% c("Untreated","AZD1775"))
+y <- norm.count.matrix(x$human$data,0.5,colSums(x$human$data))
+colnames(y) <- x$meta$Mouse
+ann.col <- data.frame(x$meta[,.(Cohort,Sampling)])
+rownames(ann.col) <- colnames(y)
+
+# DE gene 
+fname <- paste0(results.dir,"DE.genes.AZD1775.csv")
+if(file.exists(fname) & nrow(fread(fname))>0){
+  gl <- fread(fname)
+  gl <- head(gl,50)
+  z <- y[match(gl$ENSEMBL,rownames(y)),]
+  rownames(z) <- gl[,ifelse(nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+  pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T, filename = paste0(results.dir,"DE.genes.AZD1775.heatmap.png"))
+}
+
+# HALLMARK DNA REPAIR
+gl <- hm.gs$HALLMARK_DNA_REPAIR
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.DNA.genes.AZD1775.heatmap.png"),show_rownames = F)
+
+# HALLMARK EMT
+gl <- hm.gs$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.EMT.genes.AZD1775.heatmap.png"),show_rownames = F)
+```
+
+
+# PAR1006
+
+## PCAs w.r.t. batch
+
+```{r}
+pca.human <- pca.run(PAR1006$human$data,rename = T)
+pca.human <- cbind(pca.human,PAR1006$meta)
+
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(merged.lanes)),title="Coloured by sequencing runs")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(Cohort)),title="Coloured by cohort")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=cut(mouse.library.size/(human.library.size+mouse.library.size),quantile(mouse.library.size/(human.library.size+mouse.library.size)))),title="Coloured by mouse fraction")
+```
+
+No major correction needed for sequencing runs which is a good sign.
+
+## PCAs w.r.t cohort
+
+```{r}
+for(coh in unique(PAR1006$meta[,Cohort])){
+  x <- subset.PDX(PAR1006, PAR1006$meta[,Cohort %in% c(coh,"Untreated")])
+  pca.human <- pca.run(x$human$data,rename = T)
+  pca.human <- cbind(pca.human,x$meta)
+  print(suppressWarnings(ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(Cohort),shape=factor(Sampling)),title=paste0(coh,": Coloured by cohort"),)))
+}
+```
+
+## Model: ~ 0 + cohort + trial + sequencing + mouse
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1006/")
+invisible(lapply(grep("dir$",ls(),value = T), function(dname) dir.create(eval(as.name(dname)),recursive = T,showWarnings = F)))
+
+x <- subset.PDX(PAR1006, PAR1006$meta[,Cohort %in% c("Untreated","Olaparib","AZD1775","Olap.AZD1775") & Sampling=="PT"])
+cohort <- droplevels(x$meta[,Cohort])
+trial <- x$meta$Trial
+mouse <- x$meta$Mouse
+sequencing <- factor(x$meta$merged.lanes)
+d <- model.matrix(~ 0 + cohort + trial + sequencing + mouse)
+d <- d[,colSums(d)>1]
+
+n <- length(levels(cohort)) - 1
+cont <- rbind(-1,diag(n))
+colnames(cont) <- levels(cohort)[-1]
+for(i in 1:(ncol(d)-nrow(cont))) cont <- rbind(cont,0)
+rownames(cont) <- colnames(d)
+cont
+
+DE.data <- DE.run(x$human$data,d,cont.matrix=cont)
+
+#Tables of DE genes
+for(i in 1:n){
+  DE <- topTable.annotated.DE(DE.data$efit,coef = i)
+  fwrite(DE,paste0(results.dir,"DE.genes.",colnames(cont)[i],".csv"))
+}
+
+#Overlap of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.05)
+fwrite(DE[.N:1],paste0(results.dir,"DE.genes.combined.csv"))
+
+#Overlap plot
+if(nrow(DE)){
+  x <- rbind(
+    cbind(DE[,ifelse(.SD[,2:(n+1)]>0,1,0)],data.table(reg="UP")),
+    cbind(DE[,ifelse(.SD[,2:(n+1)]<0,1,0)],data.table(reg="DOWN"))
+  )
+  p <- upset(
+    x,
+    queries = list(list(query=elements,params=list("reg","UP"),color="red",active=T)),
+    order.by = "freq",
+    nsets = n,
+    nintersects = 20
+  )
+  png(paste0(results.dir,"DE.genes.combined.png"),width = 1500,height = 1000,res=300)
+  p
+  dev.off()
+}
+
+#Gene set 
+x <- lapply(1:n,function(i) GSEA.run(DE.data$v,d,cont[,i],hm.gs,0.05,igc=0.05))
+names(x) <- colnames(cont)
+for(i in 1:n) fwrite(x[[i]],paste0(results.dir,"GSEA.hallmark.",colnames(cont)[i],".csv"))
+
+#Gene set overlap
+x <- rbindlist(x,idcol = "contrast")
+x[,rank:=1:.N,contrast]
+x <-  rbind(
+  cbind(dcast(x[Direction=="Up"],pathway~contrast,value.var = "rank"),data.table(reg="Up")),
+  cbind(dcast(x[Direction=="Down"],pathway~contrast,value.var = "rank"),data.table(reg="Down")),
+  fill=TRUE
+)
+x <- cbind(x[,-grep("reg",colnames(x)),with=F],x[,.(reg)])
+x[,avg.rank:=rowMeans(.SD[,2:(ncol(x)-1)],na.rm = T)]
+fwrite(x[order(avg.rank)],paste0(results.dir,"GSEA.hallmark.combined.csv"))
+
+#Overlap plot
+x <- cbind(x[,.(reg)],x[,ifelse(!is.na(.SD[,2:(ncol(x)-2)]),1,0)])
+p <- upset(x, queries = list(list(query=elements,params=list("reg","Up"),color="red",active=T)), order.by = "freq",  nsets = n)
+png(paste0(results.dir,"GSEA.hallmark.combined.png"),width = 1500,height = 1000,res=300)
+p
+dev.off()
+
+
+# scRNAseq cluster markers vs biobank
+x <- lapply(1:n,function(i) GSEA.run(DE.data$v,d,cont[,i],scRNAseq.genes.par1006,0.05,igc=0.05))
+names(x) <- colnames(cont)
+
+for(i in 1:n) fwrite(x[[i]],paste0(results.dir,"GSEA.scRNAseq.",colnames(cont)[i],".csv"))
+
+#Gene set overlap
+x <- rbindlist(x,idcol = "contrast")
+x[,rank:=1:.N,contrast]
+x <-  rbind(
+  cbind(dcast(x[Direction=="Up"],pathway~contrast,value.var = "rank"),data.table(reg="Up")),
+  cbind(dcast(x[Direction=="Down"],pathway~contrast,value.var = "rank"),data.table(reg="Down")),
+  fill=TRUE
+)
+x <- cbind(x[,-grep("reg",colnames(x)),with=F],x[,.(reg)])
+x[,avg.rank:=rowMeans(.SD[,2:(ncol(x)-1)],na.rm = T)]
+fwrite(x[order(avg.rank)],paste0(results.dir,"GSEA.scRNAseq.combined.csv"))
+
+#Overlap plot
+x <- cbind(x[,.(reg)],x[,ifelse(!is.na(.SD[,2:(ncol(x)-2)]),1,0)])
+p <- upset(x, queries = list(list(query=elements,params=list("reg","Up"),color="red",active=T)), order.by = "freq",  nsets = n)
+png(paste0(results.dir,"GSEA.scRNAseq.combined.png"),width = 1500,height = 1000,res=300)
+p
+dev.off()
+```
+
+## Heatmaps
+
+### Olap
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1006/")
+
+x <- subset.PDX(PAR1006,PAR1006$meta$Cohort %in% c("Untreated","Olaparib"))
+y <- norm.count.matrix(x$human$data,0.5,colSums(x$human$data))
+d <- model.matrix(~ Sampling + Mouse + Cohort, x$meta)
+y <- removeBatchEffect(y, batch=x$meta$merged.lanes, batch2=x$meta$Trial, design = d)
+colnames(y) <- make.unique(substr(x$meta$Mouse,6,11))
+ann.col <- data.frame(x$meta[,.(Cohort,Sampling)])
+rownames(ann.col) <- colnames(y)
+
+# logFC gene 
+a <- rowMeans(y[,x$meta[,which(Cohort=="Olaparib" & Sampling=="T")]])
+b <- rowMeans(y[,x$meta[,which(Cohort=="Untreated")]])
+gl <- names(sort(-abs(a-b))[1:50])
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[!duplicated(ENSEMBL)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"LFC.treated.genes.Olaparib.heatmap.png"))
+
+# DE gene 
+fname <- paste0(results.dir,"DE.genes.Olaparib.csv")
+if(file.exists(fname)){
+  gl <- fread(fname)
+  gl <- head(gl,50)
+  z <- y[match(gl$ENSEMBL,rownames(y)),]
+  rownames(z) <- gl[,ifelse(nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+  pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T, filename = paste0(results.dir,"DE.genes.Olaparib.heatmap.png"))
+}
+
+# HALLMARK DNA REPAIR
+gl <- hm.gs$HALLMARK_DNA_REPAIR
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.DNA.genes.Olaparib.heatmap.png"),show_rownames = F)
+
+# HALLMARK EMT
+gl <- hm.gs$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.EMT.genes.Olaparib.heatmap.png"),show_rownames = F)
+```
+
+
+### AZD
+
+```{r}
+results.dir <- paste0(project.dir,"/PAR1006/")
+
+x <- subset.PDX(PAR1006,PAR1006$meta$Cohort %in% c("Untreated","AZD1775"))
+y <- norm.count.matrix(x$human$data,0.5,colSums(x$human$data))
+d <- model.matrix(~ Sampling + Mouse + Cohort, x$meta)
+y <- removeBatchEffect(y, batch=x$meta$merged.lanes, batch2=x$meta$Trial, design = d)
+colnames(y) <- make.unique(substr(x$meta$Mouse,6,11))
+ann.col <- data.frame(x$meta[,.(Cohort,Sampling)])
+rownames(ann.col) <- colnames(y)
+
+# logFC gene 
+a <- rowMeans(y[,x$meta[,which(Cohort=="AZD1775" & Sampling=="T")],drop=F])
+b <- rowMeans(y[,x$meta[,which(Cohort=="Untreated")]])
+gl <- names(sort(-abs(a-b))[1:50])
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENSEMBL",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[!duplicated(ENSEMBL)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"LFC.treated.genes.AZD1775.heatmap.png"))
+
+# DE gene 
+fname <- paste0(results.dir,"DE.genes.Olaparib.csv")
+if(file.exists(fname)){
+  gl <- fread(fname)
+  gl <- head(gl,50)
+  z <- y[match(gl$ENSEMBL,rownames(y)),]
+  rownames(z) <- gl[,ifelse(nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+  pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T, filename = paste0(results.dir,"DE.genes.AZD1775.heatmap.png"))
+}
+
+# HALLMARK DNA REPAIR
+gl <- hm.gs$HALLMARK_DNA_REPAIR
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.DNA.genes.AZD1775.heatmap.png"),show_rownames = F)
+
+# HALLMARK EMT
+gl <- hm.gs$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+gl <- data.table(biomaRt::select(org.Hs.eg.db,keys=gl,keytype = "ENTREZID",columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME")))
+gl <- gl[ENSEMBL %in% rownames(y)]
+z <- y[match(gl$ENSEMBL,rownames(y)),]
+#rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,ifelse(!duplicated(V1),V1,ENSEMBL)]
+rownames(z) <- gl[,ifelse(!is.na(SYMBOL) & nchar(SYMBOL),SYMBOL,ENSEMBL),ENSEMBL][,V1]
+z <- z[apply(z, 1, sd) !=0,]
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,filename = paste0(results.dir,"HALLMARK.EMT.genes.AZD1775.heatmap.png"),show_rownames = F)
+```
+
+
+# Combined
+
+## Model: ~ 0 + pdx + cohort + sequencing + trial + mous
+
+Let us look at the tissue types individually to see if they react differently.
+
+```{r}
+results.dir <- paste0(project.dir,"combined/")
+invisible(lapply(grep("dir$",ls(),value = T), function(dname) dir.create(eval(as.name(dname)),recursive = T,showWarnings = F)))
+
+x <- subset.PDX(rnaseq, rnaseq$meta[,Cohort %in% c("Untreated","Olaparib","AZD1775","Olap.AZD1775") & Sampling=="PT"])
+
+cohort <- droplevels(x$meta[,Cohort])
+trial <- factor(x$meta$Trial)
+trial[is.na(trial)] <- "ABT008"
+pdx <- factor(x$meta$project)
+mouse <- factor(x$meta$Mouse)
+sequencing <- factor(x$meta$merged.lanes)
+
+d <- model.matrix(~ 0 + pdx + cohort + sequencing + trial + mouse)
+d <- d[,colSums(d)>1]
+d <- d[,-which(colnames(d)=="sequencing5")]
+d
+
+cont <- 3:5
+names(cont) <- gsub("cohort","",colnames(d)[cont])
+n <- length(cont)
+
+DE.data <- DE.run(x$human$data,d,coefs = cont)
+
+#Tables of DE genes
+for(i in 1:n){
+  DE <- topTable.annotated.DE(DE.data$efit,coef = i)
+  fwrite(DE,paste0(results.dir,"DE.genes.",names(cont)[i],".csv"))
+}
+
+#Overlap of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.05)
+fwrite(DE[.N:1],paste0(results.dir,"DE.genes.combined.csv"))
+
+#Overlap plot
+if(nrow(DE)){
+  x <- rbind(
+    cbind(DE[,ifelse(.SD[,2:(n+1)]>0,1,0)],data.table(reg="UP")),
+    cbind(DE[,ifelse(.SD[,2:(n+1)]<0,1,0)],data.table(reg="DOWN"))
+  )
+  p <- upset(
+    x,
+    queries = list(list(query=elements,params=list("reg","UP"),color="red",active=T)),
+    order.by = "freq",
+    nsets = n,
+    nintersects = 20
+  )
+  png(paste0(results.dir,"DE.genes.combined.png"),width = 1500,height = 1000,res=300)
+  p
+  dev.off()
+}
+
+#Gene set 
+x <- lapply(1:n,function(i) GSEA.run(DE.data$v,d,cont[i],hm.gs,0.05,igc=0.05))
+names(x) <- names(cont)
+for(i in 1:n) fwrite(x[[i]],paste0(results.dir,"GSEA.hallmark.",names(cont)[i],".csv"))
+
+#Gene set overlap
+x <- rbindlist(x,idcol = "contrast")
+x[,rank:=1:.N,contrast]
+x <-  rbind(
+  cbind(dcast(x[Direction=="Up"],pathway~contrast,value.var = "rank"),data.table(reg="Up")),
+  cbind(dcast(x[Direction=="Down"],pathway~contrast,value.var = "rank"),data.table(reg="Down")),
+  fill=TRUE
+)
+x <- cbind(x[,-grep("reg",colnames(x)),with=F],x[,.(reg)])
+x[,avg.rank:=rowMeans(.SD[,2:(ncol(x)-1)],na.rm = T)]
+fwrite(x[order(avg.rank)],paste0(results.dir,"GSEA.hallmark.combined.csv"))
+
+#Overlap plot
+x <- cbind(x[,.(reg)],x[,ifelse(!is.na(.SD[,2:(ncol(x)-2)]),1,0)])
+p <- upset(x, queries = list(list(query=elements,params=list("reg","Up"),color="red",active=T)), order.by = "freq",  nsets = n)
+png(paste0(results.dir,"GSEA.hallmark.combined.png"),width = 1500,height = 1000,res=300)
+p
+dev.off()
+```
+
+
+# _archive
+
+## Copy number
+
+```{R}
+gl <- fread("~/Desktop/cis.genes.CN.csv")
+gl[,chr:=factor(gsub("chr","",tstrsplit(Genomic_location,":")[[1]]),levels = c(1:22,"X","Y"))]
+gl[,coord:=as.numeric(tstrsplit(Genomic_location,":")[[2]])]
+gls <- gl[order(All_ANOVA.pval.adj)][chr==19][1:1000][order(chr,coord)]
+z <- y[na.omit(match(gls$Ensembl_gene_id,rownames(y))),]
+pheatmap(z,annotation_col = ann.col,scale="none",show_colnames = T,cluster_rows = F,show_rownames = F,filename = "~/Desktop/PAR1006.CNA.chr19.raw.png")
+pheatmap(z,annotation_col = ann.col,scale="row",show_colnames = T,cluster_rows = F,show_rownames = F,filename = "~/Desktop/PAR1006.CNA.chr19.scaled.png")
+```

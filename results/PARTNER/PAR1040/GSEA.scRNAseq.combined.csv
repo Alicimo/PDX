@@ -1,0 +1,10 @@
+pathway,AZD1775,Olap.AZD1775,Olaparib,reg,avg.rank
+cluster.5.UP,,1,,Up,1
+cluster.3.UP,1,2,1,Down,1.33333333333333
+cluster.2.UP,2,,,Up,2
+cluster.3.DOWN,3,3,2,Up,2.66666666666667
+cluster.1.DOWN,,4,3,Down,3.5
+cluster.0.DOWN,4,,,Up,4
+cluster.4.DOWN,5,,,Up,5
+cluster.2.DOWN,6,,,Down,6
+cluster.1.UP,7,,,Up,7

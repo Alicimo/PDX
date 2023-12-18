@@ -1,0 +1,76 @@
+---
+title: "PDX: Similarity between unsorted and sorted (bulk)"
+output:
+  html_notebook: default
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(limma)
+library(edgeR)
+library(biomaRt)
+
+source("src/load.PDX.R")
+rnaseq <- get.PDX()
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,Sample.name %in% c("Sorted","Unsorted")])
+```
+
+```{r}
+ggplot(rnaseq$meta) + aes(x=fname,y=human.library.size,fill=Sample.name) + geom_col() + theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+
+
+
+
+```{r}
+x <- rnaseq$human[rowSums(cpm(rnaseq$human) > 1) >= 2,]
+x <- DGEList(x)
+x <- calcNormFactors(x, method="TMM")
+plotMDS(x,labels=rnaseq$meta[,Sample.name])
+```
+
+```{r}
+Flowcell <- rnaseq$meta$Flowcell
+Flowcell.Lane <- dropEmptyLevels(interaction(rnaseq$meta$Flowcell,rnaseq$meta$Lane))
+Sample.name <- rnaseq$meta[,Sample.name]
+d <- model.matrix(~ Sample.name + Flowcell + Flowcell.Lane)
+colnames(d)[1] <- "Intercept" 
+v <- voom(x,design=d,plot=TRUE)
+```
+
+```{r}
+vfit <- lmFit(v, d)
+c <- makeContrasts(Sorted.vs.Unsorted=Sample.nameUnsorted,levels = colnames(d))
+vfit <- contrasts.fit(vfit, contrasts=c)
+efit <- eBayes(vfit)
+```
+
+
+#Volcano plot of Sorted Vs Unsorted
+Note: +ve LFC means upregulated in unsorted, -ve LFC means upregulated in sorted
+```{r}
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+gene.IDs <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),filter="ensembl_gene_id",values=rownames(efit),mart=ensembl)
+gene.IDs <- gene.IDs[match(rownames(efit),gene.IDs$ensembl_gene_id),]
+volcanoplot(efit,highlight=8,names=gene.IDs$hgnc_symbol) + title("Sorted Vs Unsorted")
+```
+```{r}
+DE <- rbindlist(lapply((0:10)*0.1,function(x){c(x,as.list(summary(decideTests(efit,lfc=x))))}))
+names(DE) <- c("LFC.threshold","Down.DE","Non.DE","Up.DE")
+DE <- melt(DE,id.vars=c("LFC.threshold"))
+ggplot(DE[variable!="Non.DE"]) + aes(x=LFC.threshold,y=value,fill=variable) + geom_col(position="dodge")
+```
+
+```{r}
+x <- data.table(DE="Up",ensembl_gene_id=names(which(decideTests(efit,lfc=1)[,1]==1)))
+x <- rbind(x,data.table(DE="Down",ensembl_gene_id=names(which(decideTests(efit,lfc=1)[,1]==-1))))
+
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+gene.IDs <- getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),filter="ensembl_gene_id",values=x$ensembl_gene_id,mart=ensembl)
+x <- merge(x,gene.IDs)[order(DE)]
+x
+```

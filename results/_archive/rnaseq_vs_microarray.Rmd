@@ -1,0 +1,107 @@
+---
+title: "PDX - RNA-seq vs Microarray"
+output:
+  html_notebook: default
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(biomaRt)
+library(ggthemes)
+
+source("src/load.PDX.R")
+rnaseq <- get.PDX(normalise="RPKM")
+
+source("src/load.micro.R")
+```
+
+#Missing libraries
+```{r}
+x <- rnaseq$meta[,interaction(patient,primary,xenograft)]
+#micro$meta[!(interaction(patient,primary,xenograft)%in%x),Sample.name]
+#micro$meta[!(interaction(patient,primary,xenograft)%in%x),.(patient,ifelse(primary,"","M"),ifelse(xenograft,"-T","-X"))][,unique(paste0(patient,V2,V3))]
+micro$meta[!(interaction(patient,primary,xenograft)%in%x),.(patient,ifelse(primary,"","M"))][,unique(paste0(patient,V2))]
+```
+
+#Match gene IDs in rnaseq (ensembl) with microarray (hgnc), then merge
+```{r}
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+IDs <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),filter="hgnc_symbol",values=rownames(micro$counts),mart=ensembl)
+IDs <- as.data.table(IDs)
+IDs <- IDs[!(duplicated(IDs[,ensembl_gene_id]) | duplicated(IDs[,hgnc_symbol]))]
+ 
+x <- IDs[match(rownames(micro$counts),hgnc_symbol),ensembl_gene_id]
+micro$counts <- as.data.table(micro$counts)
+micro$counts[,ensembl:=x]
+
+x <- rownames(rnaseq$counts)
+rnaseq$counts <- as.data.table(rnaseq$counts)
+rnaseq$counts[,ensembl:=x]
+
+merged <- list()
+merged$counts <- merge(micro$counts,rnaseq$counts,by="ensembl")
+x <- merged$counts[,ensembl]
+merged$counts[,ensembl:=NULL]
+merged$counts <- as.matrix(merged$counts)
+rownames(merged$counts) <- x
+
+micro$meta[,exp:="micro"]
+rnaseq$meta[,exp:="rnaseq"]
+merged$meta <- rbind(micro$meta,rnaseq$meta,fill=T)
+colnames(merged$counts) <- merged$meta[,Sample.name]
+```
+
+#Calculate correlations for each patient
+```{r}
+cors <- rbindlist(lapply(intersect(merged$meta[exp=="micro",unique(patient)],merged$meta[exp=="rnaseq",unique(patient)]),function(x){
+            y <- cor(merged$counts[,merged$meta[,patient==x]],use="pairwise.complete.obs",method="spearman")
+            y <- as.data.table(melt(y[merged$meta[patient==x,exp=="micro"],merged$meta[patient==x,exp=="rnaseq"],drop=F]))
+            y[,patient:=x]
+            y
+}))
+
+ggplot(cors) + aes(x=Var1,y=value,colour=Var2) + geom_point() + facet_wrap(~patient,scales = "free_x") + labs(x="Microarray",y="Cor",colour="RNA-seq") + theme(legend.position="bottom",axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+```{r,eval=F,echo=F}
+patients <- cors[,unique(patient)]
+for(i in 1:length(patients)){
+  print(ggplot(cors[patient==patients[i]]) + aes(Var1,value,colour=Var2) + geom_point() + labs(x="Microarray",y="Cor",colour="RNA-seq",title=patients[i]) + theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+}
+```
+
+#Subset to the top 1000 most variable genes and redo cors
+```{r}
+top.var <- order(apply(merged$counts,1,var),decreasing=T)[1:1000]
+cors <- rbindlist(lapply(intersect(merged$meta[exp=="micro",unique(patient)],merged$meta[exp=="rnaseq",unique(patient)]),function(x){
+            y <- cor(merged$counts[top.var,merged$meta[,patient==x]],use="pairwise.complete.obs",method="spearman")
+            y <- as.data.table(melt(y[merged$meta[patient==x,exp=="micro"],merged$meta[patient==x,exp=="rnaseq"],drop=F]))
+            y[,patient:=x]
+            y
+}))
+
+ggplot(cors) + aes(x=Var1,y=value,colour=Var2) + geom_point() + facet_wrap(~patient,scales = "free_x") + labs(x="Microarray",y="Cor",colour="RNA-seq") + theme(legend.position="bottom",axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+#Subset to the top 1000 expressed genes (by average of all samples) and redo cors
+```{r}
+top.exp <- order(apply(merged$counts,1,mean),decreasing=T)[1:1000]
+cors <- rbindlist(lapply(intersect(merged$meta[exp=="micro",unique(patient)],merged$meta[exp=="rnaseq",unique(patient)]),function(x){
+            y <- cor(merged$counts[top.exp,merged$meta[,patient==x]],use="pairwise.complete.obs",method="spearman")
+            y <- as.data.table(melt(y[merged$meta[patient==x,exp=="micro"],merged$meta[patient==x,exp=="rnaseq"],drop=F]))
+            y[,patient:=x]
+            y
+}))
+
+ggplot(cors) + aes(x=Var1,y=value,colour=Var2) + geom_point() + facet_wrap(~patient,scales = "free_x") + labs(x="Microarray",y="Cor",colour="RNA-seq") + theme(legend.position="bottom",axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+#PCA analysis within patient
+```{r}
+pca <- prcomp(na.omit(merged$counts))
+x <- cbind(merged$meta[,exp],melt(pca$x[1:9,]))
+names(x)[1] <- "exp.type"
+ggplot(x) + geom_bar(aes(x=Var1, y=value, fill=exp.type), stat="identity") + facet_wrap(~Var2)
+```

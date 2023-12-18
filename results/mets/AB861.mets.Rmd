@@ -1,0 +1,509 @@
+---
+title: 'PDX: Met project'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+subtitle: Model AB861
+layout: page
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+rnaseq <- get.PDX()
+meta <- load.meta()
+
+meta <- subset.meta(meta,meta[,project=="metastasis" & patient=="AB861"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+
+hpa.breast <- fread(paste0(root.dir,"shared.data/human.protein.atlas/tissue_specificity_rna_breast.tsv"),check.names = T)
+hpa.lymph <- fread(paste0(root.dir,"shared.data/human.protein.atlas/tissue_specificity_rna_lymph.tsv"),check.names = T)
+hpa.gene.list <- hpa.lymph[!(Gene %in% hpa.breast$Gene),.(Gene,Ensembl)]
+```
+
+#QC
+
+```{r,fig.width=12,fig.height=6}
+read.depth.plots(rnaseq$meta)
+```
+
+There appears to be some variation across the samples as to the mouse fraction. Does this correlate to the passage number?
+
+```{r}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","Flowcell","Lane","Pool"),measure.vars = c("mouse.library.size","human.library.size"))
+x <- merge(x,meta)[,.(tissue.grafted,tissue.sampled,variable,value/sum(value)),Sample.name][variable=="mouse.library.size"]
+ggplot(x) + aes(x=tissue.grafted,y=V4,colour=tissue.sampled) + geom_boxplot() + theme(axis.text.x=element_text(angle=90,hjust=1))
+```
+
+While x4 samples do have a larger mouse fraction than others, the x3 samples have less than either the x2 or x1 samples indicating that it isn't a clear trend. Also the samples taken from the patient show little to no mouse fraction as would be expected (a good sanity check).
+
+No big issues --> proceeding to merge lanes and meta
+
+```{r}
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=abbreviate(merged.lanes)]
+```
+
+#Key questions
+
+* Are there any expression differences between the patient’s primary and met samples?
+* Within model AB861M-X1T, are there any expression differences between the tumour and the lymph nodes mets?
+* Within model AB861M-X1T, are there any expression differences between the tumour fragments that did and did not metastasise? (see Abby)
+* Are there any expression differences between the tumours, as the models have been passaged and metastatic populations have been selected? E.g. compare tumours from AB861M-X1T, AB861X1M-X0T, AB861X1M1-X0T
+
+#PCAs
+
+Before we tackle the above, let's perform a few quick pca's.
+
+```{r}
+pca <- pca.run(rnaseq$human)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.sampled,shape=xenograft) + geom_point(size=5)
+```
+
+The human samples are clearly very differet to the rest. However, what is causing the grouping between the xenograft samples?
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft])
+pca <- pca.run(x$human)
+summary(pca)
+pca <- cbind(x$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=exp.protocol) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=tissue.sampled) + geom_point(size=5)
+ggplot(pca) + aes(x=PC1,y=PC2,col=tissue.grafted,shape=merged.lanes) + geom_point(size=5)
+```
+
+We note that there is clustering based on the engrafted tissue and the experimental protocol. However, since these latter clusterings are not independent from one another, we cannot discern if the major transcriptomic change after the initial two passages is caused by changes in the tumor (tissue.grafted) or the changed protocol. Additional samples should be sequenced to try discern this. Note that this point in the sequential passages is the first time a mouse met is reimplanted.
+
+# Model: ~ 0 + tissue.grafted 
+
+## Between generations (Mets only)
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & !(tissue.grafted %in% c("AB861M","AB861M-XT1-XM1-XT1")) & tissue.sampled=="LN"])
+
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+
+d <- model.matrix(~ 0 + tissue.grafted)
+
+cont.matrix <- makeContrasts(
+   G2vsG1 = tissue.graftedAB861M.XT1.XM1 - tissue.graftedAB861M.XT1,
+   G3vsG2 = tissue.graftedAB861M.XT1.XM1.XM1 - tissue.graftedAB861M.XT1.XM1,
+   levels = colnames(d))
+
+#Perform DE
+DE.data <- DE.run(x$human,d,2,cont.matrix = cont.matrix)
+
+DE <- decideTest.annotated.DE(DE.data$efit)
+vennDiagram.paired(DE[,2:3])
+
+DE <- DE[abs(rowSums(DE[,2:3]))>=2]
+DE
+
+#Pheatmap
+i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+labels.col <- rep("",nrow(x$meta))
+ann.col <- data.frame(Generation=x$meta[,tissue.grafted])
+labels.row <- DE$SYMBOL
+rownames(ann.col) <- x$meta[,Sample.name]
+levels(ann.col$Generation) <- c("G1","G2","G3")
+j <- order(ann.col$Generation)
+cols <- hue_pal()(4)[1:3]
+names(cols) <- levels(ann.col$Generation)
+pheatmap(DE.data$v$E[i,j],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col[j,,drop=F],scale="row",cluster_cols = F,annotation_colors = list(Generation=cols))
+
+#Pheatmap with tissue.graftedAB861M.XT1.XM1.XT1 added
+y <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & !(tissue.grafted %in% c("AB861M")) & tissue.sampled=="LN"])
+z <- DGEList(y$human[rowSums(cpm(y$human) > cpm.threshold(y$human)) >= 2,])
+z <- calcNormFactors(z,method="TMM")
+z <- voom(z,y$meta[,model.matrix(~ 0 + tissue.grafted)])
+
+i <- match(DE$ENSEMBL,rownames(z))
+labels.col <- rep("",nrow(y$meta))
+ann.col <- data.frame(Generation=y$meta[,tissue.grafted])
+labels.row <- DE$SYMBOL
+rownames(ann.col) <- y$meta[,Sample.name]
+levels(ann.col$Generation) <- c("G1","G2","G3","G2x1")
+cols <- hue_pal()(4)
+names(cols) <- levels(ann.col$Generation)
+pheatmap(z[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",annotation_colors = list(Generation=cols))
+```
+
+## Between generations (Flank only)
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & !(tissue.grafted %in% c("AB861M","AB861M-XT1-XM1-XT1")) & tissue.sampled=="T"])
+
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+
+d <- model.matrix(~ 0 + tissue.grafted)
+
+cont.matrix <- makeContrasts(
+   G2vsG1 = tissue.graftedAB861M.XT1.XM1 - tissue.graftedAB861M.XT1,
+   G3vsG2 = tissue.graftedAB861M.XT1.XM1.XM1 - tissue.graftedAB861M.XT1.XM1,
+   levels = colnames(d))
+
+#Perform DE
+DE.data <- DE.run(x$human,d,2,cont.matrix = cont.matrix)
+
+DE <- decideTest.annotated.DE(DE.data$efit)
+vennDiagram.paired(DE[,2:3])
+
+DE <- DE[abs(rowSums(DE[,2:3]))==2]
+DE
+
+#Pheatmap
+i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+labels.col <- rep("",nrow(x$meta))
+ann.col <- data.frame(Generation=x$meta[,tissue.grafted])
+labels.row <- DE$SYMBOL
+rownames(ann.col) <- x$meta[,Sample.name]
+levels(ann.col$Generation) <- c("G1","G2","G3")
+j <- order(ann.col$Generation)
+cols <- hue_pal()(4)[1:3]
+names(cols) <- levels(ann.col$Generation)
+pheatmap(DE.data$v$E[i,j],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col[j,,drop=F],scale="row",cluster_cols = F,annotation_colors = list(Generation=cols))
+
+#Pheatmap with tissue.graftedAB861M.XT1.XM1.XT1 added
+y <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & !(tissue.grafted %in% c("AB861M")) & tissue.sampled=="T"])
+z <- DGEList(y$human[rowSums(cpm(y$human) > cpm.threshold(y$human)) >= 2,])
+z <- calcNormFactors(z,method="TMM")
+z <- voom(z,y$meta[,model.matrix(~ 0 + tissue.grafted)])
+
+i <- match(DE$ENSEMBL,rownames(z))
+labels.col <- rep("",nrow(y$meta))
+ann.col <- data.frame(Generation=y$meta[,tissue.grafted])
+labels.row <- DE$SYMBOL
+rownames(ann.col) <- y$meta[,Sample.name]
+levels(ann.col$Generation) <- c("G1","G2","G3","G2x1")
+cols <- hue_pal()(4)
+names(cols) <- levels(ann.col$Generation)
+pheatmap(z[i,],labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row",annotation_colors = list(Generation=cols))
+```
+
+
+# Model: ~ 0 + tissue.sampled + tissue.grafted + (batch)
+
+## Flank vs Lymph 
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted!="AB861M"])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ 0 + tissue.sampled + tissue.grafted + mouse.id)
+d <- d[,!(colnames(d) %in% c("mouse.idX45241","mouse.idX48803","mouse.idX48898"))]
+
+cont.matrix <- makeContrasts(
+   LNvsT = tissue.sampledLN - tissue.sampledT,
+   levels = colnames(d))
+rownames(cont.matrix) <- colnames(d)
+
+#Perform DE
+DE.data <- DE.run(x$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.01)
+DE <- DE[!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+if(nrow(DE)!=0){
+  print(DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+  print(DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  labels.col <- rep("",nrow(x$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- x$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+  
+  #Pheatmap w/o batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- DE.data$v$E[i,]
+  labels.col <- rep("",nrow(x$meta))
+  labels.row <- DE$SYMBOL
+  ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- x$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix,Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix,Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+# ssGSEA
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c2,d,cont.matrix = cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  print(ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  print(ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  y <- removeBatchEffect(ssGSEA.data$w[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(rnaseq$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+## Between generations
+
+```{r}
+d <- model.matrix(~ 0 + tissue.grafted + tissue.sampled + mouse.id)
+d <- d[,!(colnames(d) %in% c("mouse.idX45241","mouse.idX48803","mouse.idX48898"))]
+
+cont.matrix <- makeContrasts(
+   G2vsG1 = tissue.graftedAB861M.XT1.XM1 - tissue.graftedAB861M.XT1,
+   G3vsG2 = tissue.graftedAB861M.XT1.XM1.XM1 - tissue.graftedAB861M.XT1.XM1,
+   levels = colnames(d))
+rownames(cont.matrix) <- colnames(d)
+
+vfit <- lmFit(DE.data$v, d)
+vfit <- contrasts.fit(vfit, contrasts = cont.matrix)
+efit <- eBayes(vfit)
+DE.sub <- decideTest.annotated.DE(efit)
+
+table(DE.sub[,2:3])
+vennDiagram.paired(DE.sub[,2:3])
+DE.sub[abs(rowSums(DE.sub[,2:3]))==2,]
+```
+
+## Between generations (only F vs LN DE genes)
+
+```{r}
+i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+vfit <- lmFit(DE.data$v[i,], d)
+vfit <- contrasts.fit(vfit, contrasts = cont.matrix)
+efit <- eBayes(vfit)
+DE.sub <- decideTest.annotated.DE(efit)
+
+table(DE.sub[,2:3])
+vennDiagram.paired(DE.sub[,2:3])
+DE.sub[abs(rowSums(DE.sub[,2:3]))==2,]
+```
+
+
+## Human data
+
+```{r}
+y <- subset.PDX(rnaseq,rnaseq$meta[,is.na(tissue.grafted)])$human
+y <- log(t(1e6*t(y) / (colSums(y)*calcNormFactors(y))+0.5))
+
+up.reg <- apply(y[rownames(y) %in% DE[direction=="up.reg",ENSEMBL],],1,function(y)y[3]-y[2])
+down.reg <- apply(y[rownames(y) %in% DE[direction=="down.reg",ENSEMBL],],1,function(y)y[3]-y[2])
+
+wilcox.test(up.reg,down.reg,alternative = "g")
+
+z <- rbind(data.table(direction="up",LFC=up.reg,ENSEMBL=names(up.reg)),
+           data.table(direction="down",LFC=down.reg,ENSEMBL=names(down.reg)))
+ggplot(z) + aes(x=LFC,fill=direction) + geom_density(alpha=0.5)
+
+z <- merge(z,DE,by="ENSEMBL")
+table(z[,.(direction.x,direction.human=LFC>0)])
+z[direction.x=="up",.(ENSEMBL,SYMBOL,LFC,direction.x,LFC>0)][order(-LFC)]
+z[direction.x=="down",.(ENSEMBL,SYMBOL,LFC,direction.x,LFC>0)][order(LFC)]
+```
+
+# Model: ~ 0 + tissue.sampled*tissue.grafted + (batch)
+
+## Flank vs Lymph
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted!="AB861M"])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ 0 + tissue.sampled * tissue.grafted + mouse.id + merged.lanes)
+d <- d[,!(colnames(d) %in% c("mouse.idX45241","mouse.idX48803","mouse.idX48898"))]
+
+cont.matrix <-  matrix(c(-1,1,rep(0,dim(d)[2]-2)))
+rownames(cont.matrix) <- colnames(d)
+
+#Perform DE
+DE.data <- DE.run(x$human,d,2,cont.matrix = cont.matrix)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+DE <- DE[!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+if(nrow(DE)!=0){
+  print(DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+  print(DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+
+#Pheatmap w/ batch correction
+  #i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  #y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  #labels.row <- DE$SYMBOL
+  #labels.col <- rep("",nrow(x$meta))
+  #ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+  #rownames(ann.col) <- x$meta[,Sample.name]
+  #pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,cont.matrix,Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,cont.matrix,Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+# ssGSEA
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c2,d,cont.matrix = cont.matrix)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  print(ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  print(ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  y <- removeBatchEffect(ssGSEA.data$w[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(rnaseq$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+```
+
+
+# Model: ~ tissue.sampled:tissue.grafted + (batch)
+Note: only using paired samples
+
+## Flank vs Lymph
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & mouse %in% rnaseq$meta[,.N,mouse][N==2,mouse]])
+
+tissue.sampled <- factor(make.names(x$meta$tissue.sampled),levels = c("T","LN"))
+tissue.grafted <- make.names(x$meta$tissue.grafted)
+mouse.id <- make.names(x$meta$mouse)
+exp.protocol <- make.names(x$meta$exp.protocol)
+merged.lanes <- make.names(x$meta$merged.lanes)
+
+d <- model.matrix(~ tissue.sampled:tissue.grafted + mouse.id)
+d <- d[,!(colnames(d) %in% c("tissue.sampledT:tissue.graftedAB861M.XT1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1.XM1","tissue.sampledT:tissue.graftedAB861M.XT1.XM1.XT1"))]
+
+DE.data <- DE.run(x$human,d,2,coefs = 12:15)
+
+DE <- decideTest.annotated.DE(DE.data$efit)
+vennDiagram.paired(DE[,2:5])
+```
+
+
+#Mice with mets vs mice without mets (AB861M-XT1)
+
+## DE: human reads 
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft & tissue.grafted=="AB861M-XT1" & tissue.sampled=="T"])
+
+x$meta[,mets:=!(mouse %in% c(35309,35311,35311,35312,36361))]
+mets <- make.names(x$meta$mets)
+d <- model.matrix(~ mets)
+
+DE.data <- DE.run(x$human,d,2,coefs = 2)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  DE <- DE[!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+  print(DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+  print(DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+
+#Pheatmap w/ batch correction
+  i <- match(DE$ENSEMBL,rownames(DE.data$v$E))
+  y <- removeBatchEffect(DE.data$v$E[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  labels.row <- DE$SYMBOL
+  labels.col <- rep("",nrow(x$meta))
+  ann.col <- as.data.frame(x$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- x$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+#GSEA - c6
+gsea <- GSEA.run(DE.data$v,d,2,Hs.c6,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+#GSEA - c2
+gsea <- GSEA.run(DE.data$v,d,2,Hs.c2,0.05)
+gsea[Direction=="Up",.(rn,NGenes,Direction,FDR)]
+gsea[Direction=="Down",.(rn,NGenes,Direction,FDR)]
+
+# ssGSEA
+ssGSEA.data <- ssGSEA.run(DE.data$v$E,Hs.c2,d,coefs = 2)
+
+#Top DE gene.sets table
+ssGSEA <- topTable.annotated.ssGSEA(ssGSEA.data$efit)
+if(nrow(ssGSEA)!=0){
+  print(ssGSEA[direction=="up.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  print(ssGSEA[direction=="down.reg",.(direction,gene.set,adj.P.Val,logFC)])
+  
+  #Pheatmap w/ batch correction
+  i <- match(ssGSEA$gene.set,rownames(ssGSEA.data$w))
+  y <- removeBatchEffect(ssGSEA.data$w[i,],design = model.matrix(~tissue.sampled), batch= tissue.grafted)
+  labels.col <- rep("",nrow(rnaseq$meta))
+  labels.row <- ssGSEA$gene.set
+  ann.col <- as.data.frame(rnaseq$meta[,.(tissue.sampled,tissue.grafted)])
+  rownames(ann.col) <- rnaseq$meta[,Sample.name]
+  pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row")
+}
+
+```
+
+## DE: mouse reads 
+
+```{r}
+DE.data <- DE.run(x$mouse,d,2,coefs = 2)
+
+#Top DE genes table
+DE <- topTable.annotated.DE(DE.data$efit,p.val = 0.05)
+if(nrow(DE)!=0){
+  DE <- DE[!(ENSEMBL %in% hpa.gene.list$Ensembl)]
+  print(DE[direction=="up.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+  print(DE[direction=="down.reg",.(direction,ENSEMBL,SYMBOL,adj.P.Val,logFC)])
+}
+```
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```

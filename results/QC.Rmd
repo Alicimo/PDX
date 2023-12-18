@@ -1,0 +1,153 @@
+---
+title: "PDX: Quality control"
+output:
+  html_notebook: default
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(limma)
+library(edgeR)
+library(biomaRt)
+
+source("src/load.PDX.R")
+rnaseq <- get.PDX()
+```
+#Fraction of mouse and human in each sample
+
+```{r,fig.width=12,fig.height=6}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","xenograft","Flowcell","Lane","Pool"),measure.vars = c("mouse.library.size","human.library.size"))
+
+facet.labels <- c('FALSE'="Patient tisssue",'TRUE'="Xenograft")
+
+ggplot(x) + aes(x=Sample.name,y=value,fill=variable) + geom_col(colour="black") + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_grid(interaction(Flowcell,Lane)~xenograft+Pool,scales = "free_x",space="free_x",labeller=labeller(xenograft=facet.labels))
+
+ggplot(x) + aes(x=Sample.name,y=value,fill=variable) + geom_col(colour="black",position="fill") + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_grid(interaction(Flowcell,Lane)~xenograft+Pool,scales = "free_x",space="free_x",labeller=labeller(xenograft=facet.labels))
+```
+
+We find multiple samples that are non-xenograft contain a high fraction of reads that align unambiguously to the mouse genome. Of the affected samples, most have very few reads overall, and hence the sample should be purged regardless. Of those that will not be purged, AB692-T1-T is most notable, with ~60% mouse reads within the library. Other affected samples contain up to 15% mouse material, when it should be zero. Notably all these samples are from pool SLX-12507, which would suggest that the sample IDs have been shuffled.
+
+```{r}
+x[xenograft==FALSE][,.(variable,value,value/sum(value)),.(Sample.name,Pool,Flowcell,Lane)][variable=="mouse.library.size"][value>1E5][order(-V3)]
+```
+
+Conversely, their are no hard constraints on what PDX samples should contain, though one hopes for mostly human reads, which can be attributed to the tumor. If near 100% mouse, the tumour may be a spontaneous mouse tumor, rather than the implanted human tumour. Additionally, Mau reports that the PDX samples he has analysed have at least 3% mouse reads within the library; lower than this threshold and it may indicate that it is in fact a non-xenograft sample.
+
+```{r}
+x[xenograft==TRUE][,.(variable,value,value/sum(value)),.(Sample.name,Pool,Flowcell,Lane)][variable=="human.library.size"][V3>0.97 & value>1E5][order(-V3)]
+```
+
+```{r}
+x[xenograft==TRUE][,.(variable,value,value/sum(value)),.(Sample.name,Pool,Flowcell,Lane)][variable=="mouse.library.size"][V3>0.97 & value>1E5][order(-V3)]
+```
+
+Given the above issue with regards to mouse reads in non-PDX samples, we can see if the issue is with the pipeline by looking at the reference cell mixtures (labelled: uni_X_Y, where X and Y are the human and mouse fraction respectivly).
+
+```{r}
+x <- rnaseq$meta[,substr(Sample.name,1,3)=="Uni"]
+x <- subset.PDX(rnaseq,x)
+x$meta[,c("human.frac","mouse.frac"):=as.data.table(strsplit2(Sample.name,"_")[,2:3])]
+
+x <- melt(x$meta,id.vars=c("Sample.name","human.frac","Flowcell","Lane"),measure.vars = c("mouse.library.size","human.library.size"),variable.name = "library.type",value.name = "library.size")
+
+ggplot(x) + aes(x=reorder(human.frac,as.numeric(human.frac)),y=library.size,fill=library.type) + geom_col(col="black",position="fill") + facet_grid(~interaction(Flowcell,Lane))
+
+x <- x[,.(library.type,library.size/sum(library.size)),.(Sample.name,human.frac,Flowcell,Lane)][library.type=="human.library.size"]
+ggplot(x) + aes(x=as.numeric(human.frac),y=V2,shape=interaction(Flowcell,Lane)) + geom_jitter() + geom_smooth(method="lm")
+
+summary(lm(V2~as.numeric(human.frac)+interaction(Flowcell,Lane),data=x))
+```
+
+
+We note from the above that when the sample consists of 100% human cells, there are no mouse reads found within the RNA. However, when the sample is 100% mouse reads, a small fraction of the RNA is still identidies as belonging to human. Which genes are these reads attribruted?
+
+```{r}
+x <- subset.PDX(rnaseq, rnaseq$meta[,substr(Sample.name,1,9)=="Uni_0_100"])
+x <- x$human[rowSums(cpm(x$human)>1)>8,]
+x <- x[order(-rowSums(x)),]
+
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+y <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol","description"),filter="ensembl_gene_id",values=rownames(x),mart=ensembl)
+
+y <- y[match(rownames(x),y[,1]),]
+y$genes <- rownames(x)
+y$exp <- rowSums(x)
+head(y)
+```
+
+If we remove the top 2 expressed genes, which are rRNA (googled), how does this change the fraction of mouse vs human in these samples?
+
+```{r}
+x <- rnaseq$meta[,substr(Sample.name,1,3)=="Uni"]
+x <- subset.PDX(rnaseq,x)
+x$meta[,c("human.frac","mouse.frac"):=as.data.table(strsplit2(Sample.name,"_")[,2:3])]
+
+x$meta[,removed.reads:=colSums(x$human[rownames(x$human) %in% y$genes[1:2],])]
+x$meta[,adjust.human.library.size:=human.library.size-removed.reads]
+
+x <- melt(x$meta,id.vars=c("Sample.name","human.frac","Flowcell","Lane"),measure.vars = c("mouse.library.size","adjust.human.library.size"),variable.name = "library.type",value.name = "library.size")
+
+ggplot(x) + aes(x=reorder(human.frac,as.numeric(human.frac)),y=library.size,fill=library.type) + geom_col(col="black",position="fill") + facet_grid(~interaction(Flowcell,Lane))
+```
+
+We see that the human fraction at 100% mouse tissue no contains near 0% human thereby confirming that theo twirRNA genes were responsible for the small fraction noted earlier. A likely cause of this is the stringent conservation of rRNA between human and mouse meaning that merely single nucleotide sequencing errors could lead to the misassignment of reads between species.
+
+This result does not explain the noted issues from above however, it merely just validates that the pipeline is working well. One way to establish whether or not a sample is PDX is analysis of the genes associated with immune response. Lets first look at the immuno reponse in the control mixtures.
+
+
+```{r}
+immuno.genes <- data.table()
+immuno.genes <- rbind(immuno.genes,data.table(pheno.type="ER.HER2.neg",hgnc_symbol=as.character(tstrsplit("CXCL13, PLEK, IFNG, SLAMF7, IL2RB, PRF1, IRF1, PTPN22, IKZF1, APOBEC3G, IL2RA, ITGAL, CXCL9, GZMA, GZMB, HLA-E, CCR5, CD8A, SIRPG, CST7, GNLY, CECR1, PNOC, LCP1, HLA-DMB",", "))))
+ immuno.genes <- rbind(immuno.genes,data.table(pheno.type="HER2.plus",hgnc_symbol=as.character(tstrsplit("HLA-E, GIMAP5, IRF1, CXCL13, SEL1L3, GZMB, IKZF1, PRF1, FGL2, BIN2",", "))))
+ 
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+x <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol","description"),filter="hgnc_symbol",values=immuno.genes$hgnc_symbol,mart=ensembl)
+immuno.genes <- merge(immuno.genes,x)
+
+x <- subset.PDX(rnaseq,rnaseq$meta[,substr(Sample.name,1,3)=="Uni"])
+x$meta[,c("human.frac","mouse.frac"):=as.data.table(strsplit2(Sample.name,"_")[,2:3])]
+x$meta[,immuno.response:=colSums(x$human[rownames(x$human) %in% immuno.genes$ensembl_gene_id,])]
+
+ggplot(x$meta[human.frac!=0]) + aes(x=reorder(human.frac,as.numeric(human.frac)),y=immuno.response/human.library.size) + geom_boxplot()
+```
+
+The immuno response, taken as the summation of reads attribruted to the immuno response genes, is a clear predictor of the human frac in the sample. Let's measure the immuno response across all samples.
+
+```{r,fig.width=12,fig.height=6}
+immuno.genes <- data.table()
+immuno.genes <- rbind(immuno.genes,data.table(pheno.type="ER.HER2.neg",hgnc_symbol=as.character(tstrsplit("CXCL13, PLEK, IFNG, SLAMF7, IL2RB, PRF1, IRF1, PTPN22, IKZF1, APOBEC3G, IL2RA, ITGAL, CXCL9, GZMA, GZMB, HLA-E, CCR5, CD8A, SIRPG, CST7, GNLY, CECR1, PNOC, LCP1, HLA-DMB",", "))))
+ immuno.genes <- rbind(immuno.genes,data.table(pheno.type="HER2.plus",hgnc_symbol=as.character(tstrsplit("HLA-E, GIMAP5, IRF1, CXCL13, SEL1L3, GZMB, IKZF1, PRF1, FGL2, BIN2",", "))))
+ 
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+x <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol","description"),filter="hgnc_symbol",values=immuno.genes$hgnc_symbol,mart=ensembl)
+immuno.genes <- merge(immuno.genes,x)
+
+x <- subset.PDX(rnaseq,rep(TRUE,dim(rnaseq$meta)[1]))
+x$meta[,immuno.response:=colSums(x$human[rownames(x$human) %in% immuno.genes$ensembl_gene_id,])]
+
+ggplot(x$meta) + aes(x=Sample.name,y=immuno.response/human.library.size) + geom_col() + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_grid(interaction(Flowcell,Lane)~xenograft+Pool,scales = "free",space="free_x",labeller=labeller(xenograft=facet.labels))
+```
+
+It is clear from the above, that the immuno response is not able to discern which samples are PDX and which are biopsy cleanly. Hence, we are not able to comment on if samples are in fact mislabbeled using them.
+
+#IGNOR THE BELOW
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta[,xenograft==TRUE])
+x <- DGEList(x$mouse)
+plotMDS(x,labels=x$meta[,patient])
+
+x <- calcNormFactors(x, method="TMM")
+Flowcell <- rnaseq$meta$Flowcell
+Flowcell.Lane <- dropEmptyLevels(interaction(rnaseq$meta$Flowcell,rnaseq$meta$Lane))
+Patient <- rnaseq$meta[,patient]
+d <- model.matrix(~ 0 + Patient + Flowcell + Flowcell.Lane)
+v <- voom(x,design=d,plot=TRUE)
+E
+vfit <- lmFit(v, d)
+c <- makeContrasts(Patient=Sample.nameUnsorted - Sample.nameSorted,levels = colnames(d))
+vfit <- contrasts.fit(vfit, contrasts=c)
+efit <- eBayes(vfit)
+```

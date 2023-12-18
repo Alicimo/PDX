@@ -1,0 +1,397 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Olaparib
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+library(RColorBrewer)
+
+hg19.ensembl <- useEnsembl(biomart='ensembl', dataset='hsapiens_gene_ensembl', GRCh=37)
+
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="drug.olap"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+# QC
+
+```{r,fig.width=12,fig.height=6}
+read.depth.plots(rnaseq$meta)
+```
+
+We see that there is spontaneous mouse tumour within SLX-13120, as well as some samples that have a large fraction of mouse stroma, and finallyone sample failed completely.  The cellularity could be merely due to the PDX sample/model having a low cellularity, meaning that more stroma is present in these compared to other PDX samples/models. We should still remove the mouse tumour and the failed run, following which we can merge the lanes.
+
+Within SLX-14906, we see that the pool was highly imbalanced, and that five samples dominated the sequencing. The other samples have about roughly 1.2 million reads each; which is below the recommended amount for DE analysis (>5 mil). We will still attempt the analysis regardless.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(Sample.name %in% c("PDX124 Control resist OR (epp 14)_PDX124OR control2","201STG_ Olaparib-response_6350L_12R"))])
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+Let's just see whether there is a difference in the PDXs cellularity
+
+```{r}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","pdx","drug"),measure.vars = c("mouse.library.size","human.library.size"))
+x[,value:=value/sum(value),Sample.name]
+ggplot(x[variable=="mouse.library.size"]) + aes(x=drug,y=value,fill=drug) + geom_boxplot() + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_wrap(~pdx,scales = "free_y")
+```
+
+Treatment with olap is clearly effecting the samples cellularity, both in PDX124 and STG201. Note that it isn't affecting the cellularity in resitant model. Is this explained by the treatment "killing" the cancerous tissue?
+
+#Key questions
+
+* Are there any systematic differences between the control and treated groups?
+* Are there any traits/markers that define the speed with which resistance is devloped in the treated groups?
+* Is the transcriptome of the control group similar between mice?
+* Is resistance developed in different manners between the treated samples?
+
+# PCAs
+
+```{r}
+pca <- pca.run(rnaseq$human)
+pca <- cbind(rnaseq$meta,pca)
+pca$merged.lanes <- factor(pca$merged.lanes)
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=pdx,shape=drug), upper=list(continuous='cor'))  
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=pdx,shape=merged.lanes), upper=list(continuous='cor'))  
+```
+
+Clear differences between the two PDX models are apparent which overshadow any defined difference between the treatment arms. Let us account from that by considering models as a batch effect.
+
+```{r}
+y <- pca.prep(rnaseq$human)
+y <- removeBatchEffect(y, batch=rnaseq$meta$pdx)
+
+pca <- prcomp(t(y),scale=T)
+pca <- cbind(rnaseq$meta,pca$x)
+pca$merged.lanes <- factor(pca$merged.lanes)
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=pdx,shape=drug), upper=list(continuous='cor'))  
+ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=pdx,shape=merged.lanes), upper=list(continuous='cor'))  
+```
+
+These plots just seem messy and their is no apparent grouping w.r.t. treatment, sequeincing depth, or sequencing runs. Let's plot each of the models seperatly. Note that the top 1000 most variable genes and principal compoenents will differ between them when treated individually.
+
+```{r}
+for(PDX in unique(rnaseq$meta$pdx)){
+  x <- subset.PDX(rnaseq, rnaseq$meta[,pdx == PDX])
+  pca <- pca.run(x$human)
+  pca <- cbind(x$meta,pca)
+  print(ggpairs(pca, columns=c('PC1', 'PC2', 'PC3', "human.library.size"),mapping=aes(color=drug), upper=list(continuous='cor'))  + ggtitle(PDX))
+}
+```
+
+By looking within models, we see good seperation between treatment arms in the niave models, while little seperation in the resitant ones. This is as expected. 
+
+Seperatly there is an outlier in the STG201 model, which in itself was performed over two experimental batches. In addition, one sample of STG201 was from a tumour implanted in a different mouse brood. This is the likely culprint. Let's identify it and remove it.
+
+```{r}
+x <- subset.PDX(rnaseq, rnaseq$meta[,pdx == "STG201"])
+pca <- pca.run(x$human)
+pca <- cbind(x$meta,pca)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=factor(exp.batch)) + geom_point(size=5)
+outlier <- pca[PC1 > 25 & PC2 < -20,Sample.name]
+outlier
+```
+
+```{r}
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,Sample.name!=outlier])
+```
+
+# All data
+
+First, let us break down our PDX model types into the base type and whether it is the resitant model. Then we will construct our meta vectors.
+
+```{r}
+rnaseq$meta[,resistant:=factor(substr(pdx,nchar(pdx)-1,nchar(pdx))=="OR")]
+levels(rnaseq$meta$resistant) <- c("Niave","Resistant")
+rnaseq$meta[resistant=="Resistant",pdx:=substr(pdx,0,nchar(pdx)-2)]
+
+drug <- make.names(rnaseq$meta$drug)
+pdx <- make.names(rnaseq$meta$pdx)
+resistant <- make.names(rnaseq$meta$resistant)
+exp.batch <- make.names(rnaseq$meta$exp.batch)
+sequencing <- make.names(rnaseq$meta$merged.lanes)
+```
+
+
+
+## Model: ~ 0 + drug:(pdx*resistant)
+
+Let us look at the tissue types individually to see if they react differently.
+
+```{r}
+d <- model.matrix(~ 0 + drug:interaction(pdx,resistant))
+d <- d[,colSums(d)!=0]
+
+n <- length(unique(interaction(pdx,resistant)))
+c <- matrix(0,dim(d)[2],n)
+c[cbind(seq(1,by=2,length.out=n),1:n)] <- -1
+c[cbind(seq(2,by=2,length.out=n),1:n)] <- 1
+colnames(c) <- paste(sort(unique(interaction(pdx,resistant))),"Olap.minus.control",sep=":")
+rownames(c) <- colnames(d)
+c
+
+DE.data <- DE.run(rnaseq$human,d,2,cont.matrix=c)
+
+#Table of DE genes
+DE <- decideTest.annotated.DE(DE.data$efit,p.val = 0.05)
+DE
+
+#VennDiagrms of DE genes
+vennDiagram.paired(DE[,2:(n+1)])
+```
+
+If we treat all models individually we get no overlap bewteen the DE genes. Notably, or maybe as to be expected, DE genes are only found in the non-resistant models. This shows that we should always model the treatment effect as differing between resistant and non-resistant samples.
+
+## Model: ~ 0 + drug * resistant * pdx
+
+This model makes no presumptions about how the drug interacts w.r.t. resistance and PDX model. However, by constructing the model in such a manner, the increase in power to the above model means that we may find overlap in genes/pathways.
+
+```{r}
+#d <- model.matrix(~ drug * resistant * pdx  + sequencing) The sequencing batch effect compounds the STG201OR vs STG201 comparison. We ignore it, but are naturally worried.
+d <- model.matrix(~ drug * resistant * pdx)
+d <- d[,colSums(d)!=0]
+
+#cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+#colnames(cont.matrix) <- c("Olap.minus.control")
+#rownames(cont.matrix) <- colnames(d)
+#cont.matrix
+coefs <- c(2,3,5)
+
+#Perform DE
+DE.data <- DE.run(rnaseq$human,d,2,coefs = coefs)
+
+dt <- decideTests(DE.data$efit,p.value = 0.05)
+summary(dt)
+
+i <- which(dt[,1]!=0 | dt[,2]!=0)
+dt <- as.data.frame(dt[i,])
+dt$symbol <-  getBM(attributes=c('external_gene_name'),filters='ensembl_gene_id',mart=hg19.ensembl,values=rownames(dt))$external_gene_name
+dt
+```
+
+We find a multiple genes that define the drug response and the gaining of resistance that are shared between models.
+
+### DE Heatmaps
+
+```{r}
+for(PDX in unique(pdx)){
+  i <- match(rownames(dt),rownames(DE.data$v$E))
+  j <- which(pdx == PDX)
+  y <- DE.data$v$E[i,j]
+  labels.col <- rep("",length(j))
+  labels.row <- dt$symbol
+  ann.col <- as.data.frame(rnaseq$meta[j,.(pdx,drug,resistant=as.numeric(resistant))])
+  rownames(ann.col) <- rnaseq$meta[j,Sample.name]
+  print(pheatmap(y,labels_col=labels.col,labels_row=labels.row,annotation_col = ann.col,scale="row"))
+}
+
+```
+
+### GSEA c2
+
+```{r}
+for(i in 1:3){
+  gsea <- GSEA.run(DE.data$v,d,i,Hs.c2,0.05)
+  print(gsea[Direction=="Up",.(colnames(dt)[i],rn,NGenes,Direction,FDR)])
+  print(gsea[Direction=="Down",.(colnames(dt)[i],rn,NGenes,Direction,FDR)])
+}
+```
+
+We find that the treatment has a large effect on the transcriptome, disrupting many pathways (921 reported DE). In contrast, the gaining of the resistant phenotype leads to only a few pathways changing (22 reported DE).
+
+
+### GSEA c6
+
+```{r}
+for(i in 1:3){
+  gsea <- GSEA.run(DE.data$v,d,i,Hs.c6,0.05)
+  print(gsea[Direction=="Up",.(colnames(dt)[i],rn,NGenes,Direction,FDR)])
+  print(gsea[Direction=="Down",.(colnames(dt)[i],rn,NGenes,Direction,FDR)])
+}
+```
+
+SIRNA_EIF4GI_UP is associated with the mTOR pathway which is targeted by Olap, so this observation is a good sanity check for the analysis.
+
+### Genes of interest (no drug) [Harveer (Steve Jackson)]
+
+```{r}
+genes <- c("FAM35A","C20orf196","TP53BP1","RIF1","DYNLL1","TEN1","PARG","PARP1","MATN1","BRCA1")
+genes.ensembl <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=hg19.ensembl,values=genes)
+genes.ensembl$row.id <- match(genes.ensembl$ensembl_gene_id,rownames(DE.data$v$E))
+genes.ensembl <- genes.ensembl[!is.na(genes.ensembl$row.id),]
+  
+x <- t(DE.data$v$E[genes.ensembl$row.id,])
+#x <- t(removeBatchEffect(t(x), batch=sequencing))
+colnames(x) <- genes.ensembl$external_gene_name
+x <- cbind(rnaseq$meta[,.(pdx,resistant,drug)],x)
+
+x <- melt(x,id.vars = c("pdx","resistant","drug"))
+ggplot(x) + aes(x=interaction(pdx,drug),y=value,colour=resistant) + geom_boxplot(outlier.shape = NA) + geom_jitter(width=0.1) + facet_wrap(~variable)  + theme_bw()
+ggplot(x) + aes(x=interaction(pdx,drug),y=value,colour=resistant) + geom_boxplot(outlier.shape = NA) + geom_jitter(width=0.1) + facet_wrap(~variable,scales="free_y")  + theme_bw()
+```
+
+
+```{r}
+#genes <- c("FAM35A","C20orf196","TP53BP1","RIF1","DYNLL1","TEN1","PARG","PARP1","MATN1")
+genes <- c("FAM35A","C20orf196","TP53BP1","PARP1")
+
+genes.ensembl <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=hg19.ensembl,values=genes)
+i <- match(genes.ensembl$ensembl_gene_id,rownames(DE.data$v$E))
+genes.ensembl <- genes.ensembl[!is.na(i),]
+i <- i[!is.na(i)]
+x <- DE.data$v$E[i,]
+#x <- removeBatchEffect(x, batch=sequencing))
+rownames(x) <- genes.ensembl$external_gene_name
+
+i <- rnaseq$meta[,order(pdx,resistant,drug)]
+x.meta <- rnaseq$meta[i]
+x <- x[,i]
+
+ann.col <- as.data.frame(x.meta[,.(pdx,resistant,drug)])
+rownames(ann.col) <- colnames(x)
+labels.col <- rep("",ncol(x))
+
+pheatmap(x,labels_col=labels.col,annotation_col = ann.col,cluster_cols = F,gaps_col=c(10),scale = "row")
+```
+
+
+
+```{r}
+genes <- c("FAM35A","C20orf196","TP53BP1","PARP1","BRCA1")
+
+genes.ensembl <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=hg19.ensembl,values=genes)
+i <- match(genes.ensembl$ensembl_gene_id,rownames(DE.data$v$E))
+genes.ensembl <- genes.ensembl[!is.na(i),]
+i <- i[!is.na(i)]
+x <- DE.data$v$E[i,]
+#x <- removeBatchEffect(x, batch=sequencing))
+genes.ensembl[genes.ensembl$external_gene_name == "TP53BP1",]$external_gene_name <- "53BP1"
+rownames(x) <- genes.ensembl$external_gene_name
+
+i <- rnaseq$meta[,pdx=="STG201"]
+x <- x[,i]
+x.meta <- rnaseq$meta[i]
+
+x <- t(scale(t(x)))
+
+#i <- x.meta[,resistant=="Resistant"]
+#x <- x[,i]
+#x.meta <- x.meta[i]
+
+i <- x.meta[,order(pdx,resistant,drug,oscar.number)]
+x.meta <- x.meta[i]
+x <- x[,i]
+
+x.meta$drug <- factor(x.meta$drug)
+levels(x.meta$drug) <- c("Control","Olaparib")
+ann.col <- as.data.frame(x.meta[,.(Drug=drug,Resistance=resistant)])
+rownames(ann.col) <- colnames(x)
+#labels.col <- x.meta[,ifelse(is.na(oscar.number),Sample.name,oscar.number)]
+labels.col <- x.meta[,Sample.name]
+#labels.col <- rep("",ncol(x))
+
+pheatmap(x,labels_col=labels.col,annotation_col = ann.col,cluster_cols = F,cluster_rows=F,scale = "none",cellwidth = 15, cellheight = 15, annotation_names_col=F, breaks=seq(-4.5,2.5,length.out = 100), color = rev(colorRampPalette(brewer.pal(7,"RdYlBu"))(100)),border_color = "grey30",gaps_col = c(6,rep(11,4),18))
+```
+
+```{r}
+genes <- c("FAM35A","C20orf196","TP53BP1","PARP1")
+
+genes.ensembl <- getBM(attributes=c('ensembl_gene_id',"external_gene_name"),filters='external_gene_name',mart=hg19.ensembl,values=genes)
+i <- match(genes.ensembl$ensembl_gene_id,rownames(DE.data$v$E))
+genes.ensembl <- genes.ensembl[!is.na(i),]
+i <- i[!is.na(i)]
+x <- DE.data$v$E[i,]
+#x <- removeBatchEffect(x, batch=sequencing))
+genes.ensembl[genes.ensembl$external_gene_name == "TP53BP1",]$external_gene_name <- "53BP1"
+rownames(x) <- genes.ensembl$external_gene_name
+
+i <- rnaseq$meta[,pdx=="STG201"]
+x <- x[,i]
+x.meta <- rnaseq$meta[i]
+
+x <- t(scale(t(x)))
+
+i <- x.meta[,resistant!="Resistant"]
+x <- x[,i]
+x.meta <- x.meta[i]
+
+i <- x.meta[,order(pdx,resistant,drug,oscar.number)]
+x.meta <- x.meta[i]
+x <- x[,i]
+
+x.meta$drug <- factor(x.meta$drug)
+levels(x.meta$drug) <- c("Control","Olaparib")
+ann.col <- as.data.frame(x.meta[,.(Drug=drug)])
+rownames(ann.col) <- colnames(x)
+#labels.col <- x.meta[,ifelse(is.na(oscar.number),Sample.name,oscar.number)]
+labels.col <- rep("",ncol(x))
+
+pheatmap(x,labels_col=labels.col,annotation_col = ann.col,cluster_cols = F,cluster_rows=F,scale = "none",cellwidth = 15, cellheight = 15, annotation_names_col=F, breaks=seq(-4.5,2.5,length.out = 100), color = rev(colorRampPalette(brewer.pal(7,"RdYlBu"))(100)),border_color = "grey30")
+```
+
+
+## Model: ~ 0 + drug * resistant * pdx (STG201 only)
+
+This model makes no presumptions about how the drug interacts w.r.t. resistance and PDX model. However, by constructing the model in such a manner, the increase in power to the above model means that we may find overlap in genes/pathways.
+
+```{r}
+i <- which(pdx=="STG201")
+#d <- model.matrix(~ drug * resistant * pdx  + sequencing) The sequencing batch effect compounds the STG201OR vs STG201 comparison. We ignore it, but are naturally worried.
+d <- model.matrix(~ drug[i] * resistant[i])
+d <- d[,colSums(d)!=0]
+
+#cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+#colnames(cont.matrix) <- c("Olap.minus.control")
+#rownames(cont.matrix) <- colnames(d)
+#cont.matrix
+coefs <- c(2,3,4)
+
+#Perform DE
+DE.data <- DE.run(rnaseq$human[,i],d,2,coefs = coefs)
+topTable.annotated.DE(DE.data$efit,coef=2)
+```
+
+This model makes no presumptions about how the drug interacts w.r.t. resistance and PDX model. However, by constructing the model in such a manner, the increase in power to the above model means that we may find overlap in genes/pathways.
+
+```{r}
+i <- which(pdx!="STG201")
+#d <- model.matrix(~ drug * resistant * pdx  + sequencing) The sequencing batch effect compounds the STG201OR vs STG201 comparison. We ignore it, but are naturally worried.
+d <- model.matrix(~ drug[i] * resistant[i])
+d <- d[,colSums(d)!=0]
+
+#cont.matrix <- matrix(c(-1,1,rep(0,dim(d)[2]-2)), dim(d)[2], 1)
+#colnames(cont.matrix) <- c("Olap.minus.control")
+#rownames(cont.matrix) <- colnames(d)
+#cont.matrix
+coefs <- c(2,3,4)
+
+#Perform DE
+DE.data <- DE.run(rnaseq$human[,i],d,2,coefs = coefs)
+topTable.annotated.DE(DE.data$efit,coef=2)
+```
+
+#Session Info
+
+```{r}
+sessionInfo()
+```

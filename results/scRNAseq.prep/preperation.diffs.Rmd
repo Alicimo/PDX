@@ -1,0 +1,115 @@
+---
+title: "PDX: preperation differences (fresh/DMSO; fixed/non"
+output: html_notebook
+---
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(limma)
+library(edgeR)
+library(biomaRt)
+library(pheatmap)
+library(GSVA)
+
+load("data/human_c2_v5p2.rdata")
+load("data/mouse_c2_v5p2.rdata")
+
+load("data/human_c6_v5p2.rdata")
+load("data/mouse_c6_v5p2.rdata")
+
+ensembl <- list()
+ensembl$human <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+ensembl$mouse <- useMart("ensembl",dataset="mmusculus_gene_ensembl")
+
+source("src/load.PDX.R")
+rnaseq <- get.PDX()
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,Pool == "SLX-13298"])
+```
+
+# Library size and fractions
+
+```{r}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","xenograft","Flowcell","Lane","Pool"),measure.vars = c("mouse.library.size","human.library.size"))
+
+ggplot(x) + aes(x=Sample.name,y=value,fill=variable) + geom_col(colour="black") + theme(axis.text.x=element_text(angle=90,hjust=1))
+
+ggplot(x) + aes(x=Sample.name,y=value,fill=variable) + geom_col(colour="black",position="fill") + theme(axis.text.x=element_text(angle=90,hjust=1)) 
+```
+
+```{r}
+anova(lm(human.library.size ~ fixed + treatment, data=rnaseq$meta))
+anova(lm((human.library.size/(mouse.library.size+human.library.size)) ~ fixed + treatment + human.library.size, data=rnaseq$meta))
+```
+```{r}
+summary(lm((human.library.size/(mouse.library.size+human.library.size)) ~ fixed + treatment + human.library.size, data=rnaseq$meta))
+```
+
+# Human expression
+
+## PCA
+
+```{r}
+x <- log(rnaseq$human+0.5)
+pca <- prcomp(t(x[order(-1*apply(x,1,var)),][1:1000,]),scale=T)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=as.factor(fixed),shape=as.factor(treatment)) + geom_point(size=5) + theme_tufte(20)
+```
+
+##Differential Expression
+
+```{r}
+x <- DGEList(rnaseq$human[rowSums(cpm(rnaseq$human) > 1) >= 2,])
+x <- calcNormFactors(x, method="TMM")
+
+treatment <- make.names(rnaseq$meta$treatment)
+fixed <- make.names(rnaseq$meta$fixed)
+d <- model.matrix(~ treatment + fixed)
+v <- voom(x,design=d,plot=TRUE)
+
+vfit <- lmFit(v, d)
+tfit <- treat(vfit,1)
+
+efit <- eBayes(vfit)
+edt <- decideTests(efit,lfc=1)
+summary(edt)
+
+vennDiagram(edt[,2:3])
+```
+
+### Treatment
+
+```{r}
+DE<- as.data.table(topTable(efit,2,lfc=1,n="inf"),keep.rownames = T)[adj.P.Val<0.05]
+names(DE)[1] <- "ensembl_gene_id"
+DE <- merge(DE,getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),filter="ensembl_gene_id",values=DE$ensembl_gene_id,mart=ensembl$human),sort=F)
+DE[,.(external_gene_name,logFC,AveExpr,adj.P.Val,description)]
+
+i <-match(DE$ensembl_gene_id[1:50],rownames(v$E))
+pheatmap(v$E[i,],cutree_cols=2,labels_col = rnaseq$meta[,treatment],labels_row = DE$external_gene_name[1:50])
+
+x <- getBM(attributes=c("ensembl_gene_id","entrezgene"),filter="ensembl_gene_id",values=rownames(v),mart=ensembl$human)
+idx <- ids2indices(Hs.c2,id=x[match(rownames(v),x$ensembl_gene_id),]$entrezgene)
+GSEA <- as.data.table(camera(v,idx,d,contrast=2,inter.gene.cor = 0.05),keep.rownames=T)
+GSEA[FDR<0.05]
+```
+
+
+### Fixed
+
+```{r}
+DE<- as.data.table(topTable(efit,3,lfc=1,n="inf"),keep.rownames = T)[adj.P.Val<0.05]
+names(DE)[1] <- "ensembl_gene_id"
+DE <- merge(DE,getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),filter="ensembl_gene_id",values=DE$ensembl_gene_id,mart=ensembl$human),sort=F)
+DE[,.(external_gene_name,logFC,AveExpr,adj.P.Val,description)]
+
+i <-na.omit(match(DE$ensembl_gene_id[1:50],rownames(v$E)))
+pheatmap(v$E[i,],cutree_cols=2,labels_col = rnaseq$meta[,fixed],labels_row = DE$external_gene_name[1:50])
+
+x <- getBM(attributes=c("ensembl_gene_id","entrezgene"),filter="ensembl_gene_id",values=rownames(v),mart=ensembl$human)
+idx <- ids2indices(Hs.c2,id=x[match(rownames(v),x$ensembl_gene_id),]$entrezgene)
+GSEA <- as.data.table(camera(v,idx,d,contrast=3,inter.gene.cor = 0.05),keep.rownames=T)
+GSEA[FDR<0.05]
+```

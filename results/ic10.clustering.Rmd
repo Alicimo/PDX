@@ -1,0 +1,841 @@
+---
+title: 'PDX: IC10 Clustering'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  html_notebook:
+    toc: yes
+    toc_float: yes
+layout: page
+---
+
+# Load libraries & functions
+```{r}
+root.dir <- "~/OneDrive/projects/"
+project.dir <- paste0(root.dir,"PDX/")
+
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+source(paste0(project.dir,"src/load.PDX.R"))
+library(iC10)
+library(genefu)
+library(preprocessCore)
+
+ensembl.human = useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
+ensembl.mouse = useEnsembl(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+```
+
+# Load PDX data
+```{r}
+rnaseq <- get.PDX()
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,project=="characterisation"])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+
+rnaseq$meta[Sample.name=="AB793-T1-T" & Pool=="SLX-12501",Sample.name:=paste0(Sample.name,".R2")]
+meta <- rbind(meta,meta[Sample.name=="AB793-T1-T"])
+meta[nrow(meta),Sample.name:=paste0(Sample.name,".R2")]
+
+rnaseq <- merge.PDX(rnaseq)
+#rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,human.library.size > 1e6])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,mouse.library.size/(human.library.size+mouse.library.size) < .8])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,sample.type!="cell.line"])
+```
+
+# PCAs
+
+```{r}
+pca.human <- pca.run(rnaseq$human$data)
+ggpairs(cbind(pca.human,rnaseq$meta),columns = 1:3,mapping = aes(color=factor(merged.lanes)),title="Coloured by sequencing runs")
+ggpairs(cbind(pca.human,rnaseq$meta),columns = 1:3,mapping = aes(color=factor(sample.type)),title="Coloured by sample type")
+ggpairs(cbind(pca.human,rnaseq$meta),columns = 1:3,mapping = aes(color=cut(mouse.library.size/(human.library.size+mouse.library.size),quantile(mouse.library.size/(human.library.size+mouse.library.size)))),title="Coloured by mouse fraction")
+```
+
+
+```{R}
+x <- cbind(pca.human,rnaseq$meta)
+x[sample.type=="xenograft" & PC1>-2 & PC2>5,.(Sample.name,merged.lanes,PC1)]
+x[sample.type=="primary" & PC1< -2 & PC2>5,.(Sample.name,merged.lanes,PC1)]
+```
+
+```{r}
+(y <- x[merged.lanes %in% c("SLX-12501:HFV2VBBXX:s_5"),.(Sample.name,sample.type,primary.on.pca=PC1>-2,PC1)])
+y[,.N,.(sample.type,primary.on.pca)]
+```
+
+```{r}
+(y <- x[merged.lanes %in% c("SLX-12507:HFV2VBBXX:s_6;SLX-12507:HFV2VBBXX:s_7"),.(Sample.name,sample.type,primary.on.pca=PC1>-2,PC1)])
+y[,.N,.(sample.type,primary.on.pca)]
+```
+
+
+# Remove bad(?) libraries & repeat PCA
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(merged.lanes %in% c("SLX-12501:HFV2VBBXX:s_5","SLX-12507:HFV2VBBXX:s_6;SLX-12507:HFV2VBBXX:s_7"))])
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+```
+
+```{r}
+pca.human <- pca.run(rnaseq$human$data,rename = T)
+pca.human <- cbind(pca.human,rnaseq$meta)
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(merged.lanes)),title="Coloured by sequencing runs")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(sample.type)),title="Coloured by sample type")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_PAT),title="Coloured by ER_PAT status")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_IHC_PDX),title="Coloured by ER_IHC_PDX status")
+```
+
+We see that while some batch effect remains between the samples, the major drivers of variability is xenograft vs primary alongside ER status. For the latter of these, we see more seperation by ER in xenographs, though this could be due to the biased composition of the cohort. 
+
+```{r}
+for(stype in unique(rnaseq$meta$sample.type)){
+  x <- subset.PDX(rnaseq,rnaseq$meta$sample.type == stype)
+  pca.human <- pca.run(x$human$data,rename = T)
+  pca.human <- cbind(pca.human,x$meta)
+  print(ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(merged.lanes)),title=paste(stype,"Coloured by sequencing runs")))
+  print(ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_PAT),title=paste(stype,"Coloured by ER_PAT status")))
+  if(stype == "xenograft") print(ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_IHC_PDX),title=paste(stype,"Coloured by ER_IHC_PDX status")))
+}
+```
+
+We still don't see seperation by ER status in the primary samples when we analyse them independently of the xenografts. As to the xenograft samples, we see clearly the batch effect by (sequencing) run. We also see seperation due to ER status. Curriously, some samples do not cluster with the ER status they were found to have by IHC.
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta$sample.type == "xenograft")
+pca.human <- pca.run(x$human$data,rename = T)
+pca.human <- cbind(pca.human,x$meta)
+pca.human[ER_PAT != "" & ER_IHC_PDX != "",sum(ER_PAT!=ER_IHC_PDX)/.N]
+
+set.seed(1)
+pca.human$er.pca <- as.factor(kmeans(pca.human[,1],2)$cluster)
+levels(pca.human$er.pca) <- c("NEG","POS")
+table(pca.human[ER_PAT != "",.(er.pca,ER_PAT)])
+table(pca.human[ER_IHC_PDX %in% c("POS","NEG"),.(er.pca,ER_IHC_PDX)])
+```
+
+17% of samples change ER status according to IHC.
+83% accuracy w.r.t IHC on patients.
+86% accuracy w.r.t IHC on xenografts.
+
+Unsuprisingly, the testing on xenografts works better, though an error rate greater than 10% is till concerning.
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta$sample.type == "xenograft")
+
+pca.human <- pca.run(x$human$data)
+set.seed(1)
+x$meta$er.pca <- as.factor(kmeans(pca.human[,1],2)$cluster)
+levels(x$meta$er.pca) <- c("NEG","POS")
+
+y <- norm.count.matrix(x$human$data,lib.sizes = colSums(x$human$data))
+x$meta$ER.exp <- y[which(rownames(y) == "ENSG00000091831"),]
+
+x <- x$meta[,.(Sample.name,ER.exp,er.pca,ER_PAT,ER_IHC_PDX)]
+x <- melt(x,id.vars = 1:2)
+
+ggplot(x[value %in% c("NEG","POS")], aes(x=variable,y=ER.exp,colour=value)) + geom_boxplot() + geom_point() +theme_tufte()
+```
+
+ER expression does not exclusively drive the clustering, as we see many samples with low ER expression in the "NEG" cluster. However, it should be noted the samples that express ER differently to that found in ER_IHC_PDX.
+
+```{R}
+print("False neg:")
+x[variable=="ER_IHC_PDX" & value=="NEG"][order(-ER.exp)][1]
+print("False pos:")
+x[variable=="ER_IHC_PDX" & value=="POS"][order(ER.exp)][1:2]
+```
+
+```{r}
+x <- subset.PDX(rnaseq,rnaseq$meta$sample.type == "xenograft")
+y <- pca.prep(x$human$data,T,1000,colSums(x$human$data))
+y <- prcomp(t(y),scale=T)
+
+pc1 <- y$rotation[,1]
+pc1 <- data.table(ENSEMBL=names(pc1),value=pc1)
+pc1 <- data.table(merge(biomaRt::select(org.Hs.eg.db,keys=pc1$ENSEMBL,keytype = "ENSEMBL",
+                columns = c("ENSEMBL","ENTREZID","SYMBOL","GENENAME"),all.x=T),pc1))
+
+pc1[order(-abs(value))][1:20,.(SYMBOL,GENENAME,value)]
+```
+
+No one marker gene dominates PC1. For reference, ESR1 has rank 88.
+
+```{r}
+y <- norm.count.matrix(rnaseq$human$data,lib.sizes = colSums(rnaseq$human$data))
+x <- cbind(rnaseq$meta,ER.exp = y[which(rownames(y) == "ENSG00000091831"),])
+ggplot(x,aes(x=sample.type,y=ER.exp,color=factor(kmeans(x$ER.exp,2)$cluster))) + geom_jitter(width=.2)
+```
+
+Kmeans method can be expanded to include promary samples.
+
+Summary:
+- Batch effect due to sequencing to correct.
+- Xenograft/Primary and ER.status drives variability.
+
+# Derive genotype thresholds
+
+## ER
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+y <- cbind(rnaseq$meta,ER.exp=x[which(rownames(x) == "ENSG00000091831"),])
+ggplot(y) + aes(x=reorder(Sample.name,ER.exp),y=ER.exp,color=ER_IHC_PDX) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+ggplot(y) + aes(x=reorder(Sample.name,ER.exp),y=ER.exp,color=ER_PAT) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+```
+
+ Ideally we would do the assignment of pos/neg within lanes, but that isn't possible due to some lanes containing only POS.
+
+```{r}
+library(pROC)
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+y <- cbind(rnaseq$meta,ER.exp=x[which(rownames(x) == "ENSG00000091831"),])
+
+roc.pdx <- y[ER_IHC_PDX %in% c("POS","NEG") & sample.type=="xenograft",roc(ER_IHC_PDX,ER.exp)]
+plot(roc.pdx)
+(er.thresh.pdx <- data.table(t(coords(roc.pdx,"all",ret=c("threshold","accuracy"))))[which.max(accuracy),threshold])
+
+roc.pri <- y[ER_PAT %in% c("POS","NEG") & sample.type=="primary",roc(ER_PAT,ER.exp)]
+plot(roc.pri)
+(er.thresh.pri <- data.table(t(coords(roc.pri,"all",ret=c("threshold","accuracy"))))[which.max(accuracy),threshold])
+
+ggplot(y) + aes(x=reorder(Sample.name,ER.exp),y=ER.exp,color=ER_IHC_PDX) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank()) + geom_hline(aes(yintercept=er.thresh.pdx))
+
+ggplot(y) + aes(x=reorder(Sample.name,ER.exp),y=ER.exp,color=ER_PAT) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank()) + geom_hline(aes(yintercept=er.thresh.pri))
+```
+
+```{r}
+y[,er.inferred:=ifelse(sample.type=="xenograft", ifelse(ER.exp>er.thresh.pdx,"POS","NEG"), ifelse(ER.exp>er.thresh.pri,"POS","NEG"))]
+ggplot(y) + aes(x=reorder(Sample.name,ER.exp),y=ER.exp,color=er.inferred) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+```
+
+```{r}
+rnaseq$meta$er.inferred <- y$er.inferred
+```
+
+## HER2
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+y <- cbind(rnaseq$meta,HER2.exp=x[which(rownames(x) == "ENSG00000141736"),])
+ggplot(y) + aes(x=reorder(Sample.name,HER2.exp),y=HER2.exp,color=HER2_PDX) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+ggplot(y) + aes(x=reorder(Sample.name,HER2.exp),y=HER2.exp,color=HER2_PAT) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+```
+
+ Ideally we would do the assignment of pos/neg within lanes, but that isn't possible due to some lanes containing only POS.
+
+```{r}
+library(pROC)
+
+roc.pdx <- y[HER2_PDX %in% c("POS","NEG") & sample.type=="xenograft",roc(HER2_PDX,HER2.exp)]
+plot(roc.pdx)
+(HER2.thresh.pdx <- data.table(t(coords(roc.pdx,"all",ret=c("threshold","accuracy"))))[which.max(accuracy),threshold])
+
+roc.pri <- y[HER2_PAT %in% c("POS","NEG") & sample.type=="primary",roc(HER2_PAT,HER2.exp)]
+plot(roc.pri)
+(HER2.thresh.pri <- data.table(t(coords(roc.pri,"all",ret=c("threshold","accuracy"))))[which.max(accuracy),threshold])
+
+ggplot(y) + aes(x=reorder(Sample.name,HER2.exp),y=HER2.exp,color=HER2_PDX) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank()) + geom_hline(aes(yintercept=HER2.thresh.pdx))
+
+ggplot(y) + aes(x=reorder(Sample.name,HER2.exp),y=HER2.exp,color=HER2_PAT) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank()) + geom_hline(aes(yintercept=HER2.thresh.pri))
+```
+
+```{r}
+y[,HER2.inferred:=ifelse(sample.type=="xenograft", ifelse(HER2.exp>HER2.thresh.pdx,"POS","NEG"), ifelse(HER2.exp>HER2.thresh.pri,"POS","NEG"))]
+ggplot(y) + aes(x=reorder(Sample.name,HER2.exp),y=HER2.exp,color=HER2.inferred) + geom_point() + facet_grid(sample.type~merged.lanes) + theme(axis.text.x = element_blank())
+```
+
+```{r}
+rnaseq$meta$HER2.inferred <- y$HER2.inferred
+```
+
+
+# Batch correction on TPMs
+
+## Without batch correction
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+pca.human <- pca.run(x,normalise = F)
+pca.human <- cbind(pca.human,rnaseq$meta)
+
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(merged.lanes)),title="Coloured by sequencing runs")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(sample.type)),title="Coloured by sample type")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_PAT),title="Coloured by ER_PAT status")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_IHC_PDX),title="Coloured by ER_IHC_PDX status")
+```
+
+## With batch correction
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+er.type <- rnaseq$meta$er.inferred
+her2.type <- rnaseq$meta$HER2.inferred
+
+d <- model.matrix(~ 0 + sample.type + er.type + her2.type)
+x <-  removeBatchEffect(x,batch = sequencing,design = d)
+
+pca.human <- pca.run(x,normalise = F,rename = T)
+pca.human <- cbind(pca.human,rnaseq$meta)
+
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(merged.lanes)),title="Coloured by sequencing runs")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=factor(sample.type)),title="Coloured by sample type")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_PAT),title="Coloured by ER_PAT status")
+ggpairs(pca.human,columns = 1:3,mapping = aes(color=ER_IHC_PDX),title="Coloured by ER_IHC_PDX status")
+```
+
+# Calc. & Write TPMs
+
+## Default
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+er.type <- rnaseq$meta$er.inferred
+her2.type <- rnaseq$meta$HER2.inferred
+
+d <- model.matrix(~ 0 + sample.type + er.type + her2.type)
+
+rnaseq.TPMs <- list(
+  meta = rnaseq$meta,
+  human = list(
+    gene.meta = rnaseq$human$gene.meta,
+    TPMs = calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)
+  ),
+  mouse = list(
+    gene.meta = rnaseq$mouse$gene.meta,
+    TPMs = calculate_tpm(rnaseq$mouse$data,rnaseq$mouse$gene.meta$Length)
+  )
+)
+
+rnaseq.TPMs$human$TPMs.correct <- removeBatchEffect(log(rnaseq.TPMs$human$TPMs+0.5),batch = sequencing,design = d)
+rnaseq.TPMs$mouse$TPMs.correct <- removeBatchEffect(log(rnaseq.TPMs$mouse$TPMs+0.5),batch = sequencing,design = d)
+
+keyMap <- data.table(getBM(
+  attributes=c('hgnc_symbol','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rownames(rnaseq.TPMs$human$TPMs.correct), 
+  mart = ensembl.human
+))
+rownames(rnaseq.TPMs$human$TPMs.correct) <- keyMap[match(rownames(rnaseq.TPMs$human$TPMs.correct),keyMap$ensembl_gene_id),]$hgnc_symbol
+rnaseq.TPMs$human$TPMs.correct <- rnaseq.TPMs$human$TPMs.correct[rownames(rnaseq.TPMs$human$TPMs.correct) != "",]
+rnaseq.TPMs$human$TPMs.correct <- rnaseq.TPMs$human$TPMs.correct[(rowSums(is.na(rnaseq.TPMs$human$TPMs.correct)) == 0),]
+
+keyMap <- data.table(getBM(
+  attributes=c('mgi_symbol','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rownames(rnaseq.TPMs$mouse$TPMs.correct), 
+  mart = ensembl.mouse
+))
+rownames(rnaseq.TPMs$mouse$TPMs.correct) <- keyMap[match(rownames(rnaseq.TPMs$mouse$TPMs.correct),keyMap$ensembl_gene_id),]$mgi_symbol
+rnaseq.TPMs$mouse$TPMs.correct <- rnaseq.TPMs$mouse$TPMs.correct[rownames(rnaseq.TPMs$mouse$TPMs.correct) != "",]
+rnaseq.TPMs$mouse$TPMs.correct <- rnaseq.TPMs$mouse$TPMs.correct[(rowSums(is.na(rnaseq.TPMs$mouse$TPMs.correct)) == 0),]
+```
+
+```{r}
+i <- rnaseq$meta[,which(patient=="AB559")]
+j <- rowSums(rnaseq.TPMs$human$TPMs.correct[,i]==0) != 2
+quantile(apply(rnaseq.TPMs$human$TPMs.correct[j,i],1,diff))
+cor(rnaseq.TPMs$human$TPMs.correct[,i])
+boxplot(cor(rnaseq.TPMs$human$TPMs.correct))
+```
+
+```{r,eval=F}
+fwrite(rnaseq.TPMs$meta,"~/Desktop/PDX.rnaseq.char.sample_meta.csv")
+#fwrite(rnaseq.TPMs$human$humangene.meta,"~/Desktop/PDX.rnaseq.char.human.gene_meta.csv")
+fwrite(as.data.table(rnaseq.TPMs$human$TPMs.correct,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.human.TPMs_corrected.csv")
+#fwrite(as.data.table(rnaseq.TPMs$data.TPMs,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.mouse.TPMs.csv")
+fwrite(as.data.table(rnaseq.TPMs$mouse$TPMs.correct,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.mouse.TPMs_corrected.csv")
+```
+ 
+
+ 
+## Inc. mouse
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+set.seed(1); er.type <- kmeans(x[which(rownames(x) == "ENSG00000091831"),],2)$cluster
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+d <- model.matrix(~ 0 + sample.type + er.type)
+
+rnaseq.TPMs <- list(
+  meta = rnaseq$meta,
+  human = list(
+    gene.meta = rnaseq$human$gene.meta,
+    TPMs = calculate_tpm(rnaseq$human$data,
+                         rnaseq$human$gene.meta$Length,
+                         ls=colSums(rnaseq$human$data) + colSums(rnaseq$mouse$data))
+  ),
+  mouse = list(
+    gene.meta = rnaseq$mouse$gene.meta,
+    TPMs = calculate_tpm(rnaseq$mouse$data,
+                         rnaseq$mouse$gene.meta$Length,
+                         ls=colSums(rnaseq$human$data) + colSums(rnaseq$mouse$data))
+  )
+)
+
+rnaseq.TPMs$human$TPMs.correct <- removeBatchEffect(log(rnaseq.TPMs$human$TPMs+0.5),batch = sequencing,design = d)
+rnaseq.TPMs$mouse$TPMs.correct <- removeBatchEffect(log(rnaseq.TPMs$mouse$TPMs+0.5),batch = sequencing,design = d)
+
+keyMap <- data.table(getBM(
+  attributes=c('hgnc_symbol','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rownames(rnaseq.TPMs$human$TPMs.correct), 
+  mart = ensembl.human
+))
+rownames(rnaseq.TPMs$human$TPMs.correct) <- keyMap[match(rownames(rnaseq.TPMs$human$TPMs.correct),keyMap$ensembl_gene_id),]$hgnc_symbol
+rnaseq.TPMs$human$TPMs.correct <- rnaseq.TPMs$human$TPMs.correct[rownames(rnaseq.TPMs$human$TPMs.correct) != "",]
+rnaseq.TPMs$human$TPMs.correct <- rnaseq.TPMs$human$TPMs.correct[(rowSums(is.na(rnaseq.TPMs$human$TPMs.correct)) == 0),]
+
+keyMap <- data.table(getBM(
+  attributes=c('mgi_symbol','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rownames(rnaseq.TPMs$mouse$TPMs.correct), 
+  mart = ensembl.mouse
+))
+rownames(rnaseq.TPMs$mouse$TPMs.correct) <- keyMap[match(rownames(rnaseq.TPMs$mouse$TPMs.correct),keyMap$ensembl_gene_id),]$mgi_symbol
+rnaseq.TPMs$mouse$TPMs.correct <- rnaseq.TPMs$mouse$TPMs.correct[rownames(rnaseq.TPMs$mouse$TPMs.correct) != "",]
+rnaseq.TPMs$mouse$TPMs.correct <- rnaseq.TPMs$mouse$TPMs.correct[(rowSums(is.na(rnaseq.TPMs$mouse$TPMs.correct)) == 0),]
+```
+
+```{r,eval=F}
+#fwrite(rnaseq.TPMs$meta,"~/Desktop/PDX.rnaseq.char.sample_meta.csv")
+#fwrite(rnaseq.TPMs$human$humangene.meta,"~/Desktop/PDX.rnaseq.char.human.gene_meta.csv")
+fwrite(as.data.table(rnaseq.TPMs$human$TPMs.correct,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.human.TPMs_corrected_libsize.csv")
+#fwrite(as.data.table(rnaseq.TPMs$data.TPMs,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.mouse.TPMs.csv")
+fwrite(as.data.table(rnaseq.TPMs$mouse$TPMs.correct,keep.rownames = "Geneid"),"~/Desktop/PDX.rnaseq.char.mouse.TPMs_corrected_libsize.csv")
+```
+
+# Combining with TCGA
+
+## Load TCGA data
+
+```{r}
+fname <- paste0(root.dir,"tcga/data/rnaseq.RDS")
+if(!file.exists(fname)){
+  x <- lapply(list.dirs(paste0(root.dir,"tcga/data/rnaseq"),recursive = F),
+              function(x) fread(cmd=paste("gzip -dc",list.files(x,pattern = "*.gz",full.names = T)[1]))
+              )
+  tcga <- as.matrix(do.call(cbind,lapply(x, function(y) y[,2])))
+  rownames(tcga) <- tstrsplit(unlist(x[[1]][,1]),"\\.")[[1]]
+  colnames(tcga) <- basename(list.dirs(paste0(root.dir,"tcga/data/rnaseq")))
+  rm(x)
+  saveRDS(tcga,fname)
+}
+tcga <- readRDS(fname)
+
+fname <- paste0(root.dir,"tcga/data/rnaseq.meta.csv")
+if(!file.exists(fname)){
+  library(GenomicDataCommons)
+  TCGAtranslateID = function(file_ids, legacy = FALSE) {
+    info = files(legacy = legacy) %>%
+        filter( ~ file_id %in% file_ids) %>%
+        select('cases.samples.submitter_id') %>%
+        results_all()
+    
+    id_list = lapply(info$cases,function(a) {
+        a[[1]][[1]][[1]]})
+
+    barcodes_per_file = sapply(id_list,length)
+    
+    return(data.frame(file_id = rep(ids(info),barcodes_per_file),
+                    submitter_id = unlist(id_list)))
+  }
+  fnames <- basename(list.dirs(paste0(root.dir,"tcga/data/rnaseq"),recursive = F))
+  tcga.meta <- data.table(TCGAtranslateID(fnames))
+  tcga.meta <- tcga.meta[match(fnames,file_id)]
+  tcga.meta[,bcr_patient_barcode:=substr(submitter_id,0,12)]
+  
+  clinical <- fread(paste0(root.dir,"tcga/data/clincal_meta_brca.txt"),skip = 1)
+  tcga.meta <- merge(tcga.meta,clinical,all.x=T,sort=F)
+  
+  fwrite(tcga.meta,fname)
+}
+tcga.meta <- fread(fname)
+```
+
+## PCA (TCGA only)
+
+```{r}
+pca.human <- pca.run(tcga,normalise = T)
+pca.human <- cbind(pca.human,tcga.meta)
+ggpairs(pca.human,columns = 1:3,aes(colour=breast_carcinoma_estrogen_receptor_status))
+```
+
+##PCA (combined) w/ various normalisations
+
+```{r}
+x <- log(calculate_tpm(rnaseq$human$data,rnaseq$human$gene.meta$Length)+0.5)
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+set.seed(1); er.type <- kmeans(x[which(rownames(x) == "ENSG00000091831"),],2)$cluster
+
+i <- which(rowSums(rnaseq$human$data) != 0)
+x <- rnaseq$human$data[i,]
+x <- DGEList(x)
+x <- calcNormFactors(x)
+x <- voom(x,design = model.matrix(~ 0 + sample.type + er.type + sequencing))
+x <- removeBatchEffect(x$E, batch=sequencing, design=model.matrix(~ 0 + sample.type + er.type))
+
+i <- tcga.meta[,breast_carcinoma_estrogen_receptor_status %in% c("Negative","Positive")]
+y <- DGEList(tcga[,i])
+y <- calcNormFactors(y)
+y <- voom(y, design = model.matrix(~ 0 + tcga.meta$breast_carcinoma_estrogen_receptor_status[i]))
+
+x <- cbind(x,y$E[match(rownames(x),rownames(y)),])
+rm(y)
+
+db <- c(rep("PDX",nrow(rnaseq$meta)),rep("TCGA",sum(i)))
+er <- c(er.type,as.numeric(factor(tcga.meta[i]$breast_carcinoma_estrogen_receptor_status)))
+sample.type <- c(rnaseq$meta$sample.type,rep("primary",sum(i)))
+
+pca.human <- pca.run(x,normalise = F,rename = T)
+pca.human <- data.table(pca.human,db,er)
+ggpairs(pca.human,columns = 1:3,aes(color=db,shape=factor(er)),title = "Without correction")
+
+pca.human <- pca.run(normalize.quantiles(x),normalise = F,rename = T)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db,shape=factor(er)),title = "With quant.norm")
+
+pca.human <- pca.run(removeBatchEffect(x,batch = db,design = model.matrix(~ 0 + sample.type + er)),normalise = F,rename = T)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db,shape=factor(er)),title = "With linear model norm")
+
+pca.human <- pca.run(normalize.quantiles(removeBatchEffect(x,batch = db,design = model.matrix(~ 0 + sample.type + er))),normalise = F,rename = T)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db,shape=factor(er)),title = "With both")
+```
+
+## Combining
+
+Quantile correction seperates the datasets more than leaving them untouched.
+Linear model batch correction works well, though some concern remains w.r.t. ER status.
+Linear+quantile can't hurt, but hard to justify. :P
+Xenografts cluster seperately regardless.
+
+```{r}
+sequencing <- rnaseq$meta[,merged.lanes]
+sample.type <- rnaseq$meta[,sample.type]
+er.type <- rnaseq$meta[,er.inferred]
+her2.type <- rnaseq$meta[,HER2.inferred]
+
+#i <- which(rowSums(rnaseq$human$data) != 0)
+x <- rnaseq$human$data
+x <- DGEList(x)
+x <- calcNormFactors(x) # w/o mouse
+#x <- calcNormFactors(x,lib.size = rnaseq$meta[,human.library.size + mouse.library.size] ) # w/ mouse
+x <- voom(x,design = model.matrix(~ 0 + sample.type + er.type + her2.type + sequencing))
+x <- removeBatchEffect(x$E, batch=sequencing, design=model.matrix(~ 0 + sample.type + er.type + her2.type))
+
+i <- tcga.meta[,
+               breast_carcinoma_estrogen_receptor_status %in% c("Negative","Positive") &
+               lab_proc_her2_neu_immunohistochemistry_receptor_status %in% c("Negative","Positive")
+              ] #810 samples!
+y <- DGEList(tcga[,i])
+y <- calcNormFactors(y)
+y <- voom(y, design = tcga.meta[i,model.matrix(~ 0 + breast_carcinoma_estrogen_receptor_status + lab_proc_her2_neu_immunohistochemistry_receptor_status)])
+
+combined <- cbind(x,y$E[match(rownames(x),rownames(y)),])
+#combined <- combined[(rowSums(is.na(combined)) == 0),]
+# rm(y)
+
+db <- c(rep("PDX",nrow(rnaseq$meta)),rep("TCGA",sum(i)))
+er <- c(er.type,toupper(substr(tcga.meta[i]$breast_carcinoma_estrogen_receptor_status,1,3)))
+her2 <- c(her2.type,toupper(substr(tcga.meta[i]$lab_proc_her2_neu_immunohistochemistry_receptor_status,1,3)))
+sample.type <- c(rnaseq$meta$sample.type,rep("primary",sum(i)))
+```
+
+# IC10
+
+## Load training data
+
+```{R}
+library(iC10TrainingData)
+data("Map.Exp")
+```
+
+## PCA of essential genes
+
+### PDX biobank only
+
+```{r}
+i <- which((rownames(combined) %in% Map.Exp$Ensembl_ID))
+j <- which(db == "PDX")
+  
+pca.human <- data.table(pca.run(combined[i,j], normalise = F,rename = T, N=NA))
+ggpairs(pca.human,columns = 1:3,aes(color=factor(er[j])),title = "Raw")
+ggpairs(pca.human,columns = 1:3,aes(color=sample.type[j]),title = "Raw")
+
+pca.human <- data.table(pca.run(
+  removeBatchEffect(combined[i,j], batch=sample.type[j], design=model.matrix(~ 0 + er[j])),
+  normalise = F,rename = T, N=NA))
+ggpairs(pca.human,columns = 1:3,aes(color=factor(er[j])),title = "Corrected")
+ggpairs(pca.human,columns = 1:3,aes(color=sample.type[j]),title = "Corrected")
+```
+
+### Combined
+
+
+```{r}
+
+i <- which((rownames(combined) %in% Map.Exp$Ensembl_ID))
+
+pca.human <- pca.run(combined[i,], normalise = F,rename = T, N=NA)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db),title = "Raw")
+ggpairs(pca.human,columns = 1:3,aes(color=factor(er)),title = "Raw")
+ggpairs(pca.human,columns = 1:3,aes(color=sample.type),title = "Raw")
+
+pca.human <- pca.run(
+  removeBatchEffect(combined[i,],batch = db,design = model.matrix(~ 0 + sample.type + er)),
+  normalise = F,rename = T, N=NA)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db),title = "No sample.type correction")
+ggpairs(pca.human,columns = 1:3,aes(color=factor(er)),title = "No sample.type correction")
+ggpairs(pca.human,columns = 1:3,aes(color=sample.type),title = "No sample.type correction")
+
+pca.human <- pca.run(
+  removeBatchEffect(combined[i,], batch=db, batch2=sample.type, design=model.matrix(~ 0 + er)),
+  normalise = F,rename = T, N=NA)
+pca.human <- data.table(pca.human,db)
+ggpairs(pca.human,columns = 1:3,aes(color=db),title = "With sample.type correction")
+ggpairs(pca.human,columns = 1:3,aes(color=factor(er)),title = "With sample.type correction")
+ggpairs(pca.human,columns = 1:3,aes(color=sample.type),title = "With sample.type correction")
+```
+
+## default
+
+```{r}
+x <- combined[rownames(combined) %in% Map.Exp$Ensembl_ID,]
+y <- removeBatchEffect(x,batch = db,design = model.matrix(~ 0 + sample.type + er + her2))
+rownames(y) <- rownames(x)
+
+rownames(y) <- Map.Exp[match(rownames(y),Map.Exp$Ensembl_ID),"Gene_symbol"]
+y <- y[!is.na(rownames(y)),]
+
+# Run iC10
+features <- matchFeatures(Exp=y,Exp.by.feat = "gene")
+features <- normalizeFeatures(features, "scale")
+res <- iC10(features)
+gof <- goodnessOfFit(res)
+
+rnaseq$meta$iClust.default <- res$class[1:nrow(rnaseq$meta)]
+```
+
+
+## with gene length correction
+
+```{r}
+x <- combined[rownames(combined) %in% Map.Exp$Ensembl_ID,]
+y <- removeBatchEffect(x,batch = db,design = model.matrix(~ 0 + sample.type + er + her2))
+y <- y - log(rnaseq$human$gene.meta$Length/1E3)
+rownames(y) <- rownames(x)
+
+rownames(y) <- Map.Exp[match(rownames(y),Map.Exp$Ensembl_ID),"Gene_symbol"]
+y <- y[!is.na(rownames(y)),]
+
+# Run iC10
+features <- matchFeatures(Exp=y,Exp.by.feat = "gene")
+features <- normalizeFeatures(features, "scale")
+res <- iC10(features)
+gof <- goodnessOfFit(res)
+
+rnaseq$meta$iClust.gl <- res$class[1:nrow(rnaseq$meta)]
+```
+
+## with quantile norm
+
+```{r}
+y <- removeBatchEffect(combined,batch = db,design = model.matrix(~ 0 + sample.type + er + her2))
+y <- normalize.quantiles(y)
+rownames(y) <- rownames(combined)
+
+rownames(y) <- Map.Exp[match(rownames(y),Map.Exp$Ensembl_ID),"Gene_symbol"]
+y <- y[!is.na(rownames(y)),]
+
+# Run iC10
+features <- matchFeatures(Exp=y,Exp.by.feat = "gene")
+features <- normalizeFeatures(features, "scale")
+res <- iC10(features)
+gof <- goodnessOfFit(res)
+
+rnaseq$meta$iClust.quant <- res$class[1:nrow(rnaseq$meta)]
+```
+
+## with batch correction for PDX
+
+```{r, eval=F}
+x <- combined[rownames(combined) %in% Map.Exp$Ensembl_ID,]
+y <- removeBatchEffect(x,batch = db, batch2=sample.type, design = model.matrix(~ 0 + er + her2))
+rownames(y) <- rownames(x)
+
+rownames(y) <- Map.Exp[match(rownames(y),Map.Exp$Ensembl_ID),"Gene_symbol"]
+y <- y[!is.na(rownames(y)),]
+
+# Run iC10
+features <- matchFeatures(Exp=y,Exp.by.feat = "gene")
+features <- normalizeFeatures(features, "scale")
+res <- iC10(features)
+gof <- goodnessOfFit(res)
+
+rnaseq$meta$iClust.pdx <- res$class[1:nrow(rnaseq$meta)]
+```
+
+```{r}
+p.IDs <- unique(rnaseq$meta[,.(patient,sample.type)])[,.N,patient][N==2,patient]
+x <- rnaseq$meta[patient %in% p.IDs,.(patient,sample.type,iClust.default,iClust.corrected)][order(patient,sample.type)]
+x[,.(
+  iClust.default[1]==iClust.default[-1],
+  iClust.corrected[1]==iClust.corrected[-1]
+  ),patient][,.(sum(V1)/.N,sum(V2)/.N,.N)]
+
+x[,.(
+  iClust.default[1]==iClust.default[-1],
+  iClust.corrected[1]==iClust.corrected[-1]
+  ),patient][,.(sum(V1)/.N,sum(V2)/.N,.N),patient]
+
+x[,.(
+  iClust.default[1]==iClust.default[-1],
+  iClust.corrected[1]==iClust.corrected[-1]
+  ),patient][,.(sum(V1)/.N,sum(V2)/.N,.N),patient][,.(mean(V1),mean(V2))]
+```
+
+# PAM50
+
+```{r}
+y <- removeBatchEffect(combined,batch = db,design = model.matrix(~ 0 + sample.type + er))
+rownames(y) <- rownames(combined)
+
+keyMap <- data.table(getBM(
+  attributes=c('entrezgene_id','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rownames(y), 
+  mart = ensembl.human
+))
+rownames(y) <- keyMap[match(rownames(y),keyMap$ensembl_gene_id),]$entrezgene_id
+y <- y[!is.na(rownames(y)),]
+
+dmat <- t(y)
+dannot <- as.matrix(data.frame("probe"=rownames(y),"EntrezGene.ID" = rownames(y)))
+rownames(dannot) <- rownames(y)
+pam50.annon <- molecular.subtyping(sbt.model = "pam50",data = dmat,annot = dannot,do.mapping = T)
+
+rnaseq$meta$PAM50 <- pam50.annon$subtype[1:nrow(rnaseq$meta)]
+```
+
+```{r,eval=F}
+fwrite(rnaseq$meta,"~/Desktop/PDX.rnaseq.char.sample_meta.csv")
+```
+
+
+#################################################################
+
+
+
+#IC10 (subsampling)
+
+## Run
+
+```{r}
+#rnaseq.pdx <- subset.PDX(rnaseq,which(rnaseq$meta[,human.library.size>10E6]))
+
+keyMap <- data.table(getBM(
+  attributes=c('hgnc_symbol','ensembl_gene_id'),
+  filters = 'ensembl_gene_id', 
+  values = rnaseq$human$gene.meta$Geneid, 
+  mart = ensembl))
+
+subsample.counts <- function(x,totalReads,scaling.factors=NULL){
+  y <- sapply(1:ncol(x),function(i){
+    y <- x[,i]
+    n <- length(y)
+    if(is.null(scaling.factors)) N <- totalReads
+    else N <- totalReads * scaling.factors[i]
+    y <- sample(1:n,N,replace=T,prob=y)
+    z <- rep(0,n)
+    for(i in 1:N){
+      j <- y[i]
+      z[j] = z[j] + 1
+    }
+    z
+  })
+  rownames(y) <- rownames(x)
+  y
+}
+
+x <- cbind(rnaseq$human$data,tcga[match(rnaseq$human$gene.meta$Geneid,rownames(tcga)),])
+
+readLimits <- seq(10,2,-2)*1E6
+
+res.pdx <- lapply(readLimits,function(totalReads){
+  
+  # Subsample and then bind with TCGA
+  z <- subsample.counts(x,totalReads,scaling.factors)
+  z <- cbind(z,y)
+  z <- z[rowSums(z)!=0,]
+  
+  # Normalise
+  #z <- t(1E6 * t(z) / (colSums(z) * calcNormFactors(z)))
+  group <- c(rep("PDX",dim(x)[2]),rep("TCGA",dim(y)[2]))
+  design <- model.matrix(~ 0 + group)
+  z <- voom(z,design)
+  
+  # Run iC10
+  features <- matchFeatures(Exp=z$E,Exp.by.feat = "gene")
+  features <- normalizeFeatures(features, "scale")
+  res <- iC10(features)
+  gof <- goodnessOfFit(res)
+  
+  res <- res$posterior[1:ncol(x),]
+  rownames(res) <- colnames(x)
+  
+  gof <- gof$indiv[1:ncol(x)]
+  names(gof) <- colnames(x)
+  return(list("res"=res,"gof"=gof))
+})
+names(res.pdx) <- paste0(readLimits/1E6,".milion.reads")
+```
+
+## Results
+
+```{r}
+z <- rbindlist(lapply(lapply(res.pdx,"[[","res"), melt),idcol = "total.reads")
+z <- z[,.(sample.name=Var1,total.mil.reads=as.integer(tstrsplit(total.reads,"\\.")[[1]]),iC10=Var2,iC10.prob=value)]
+z$sample.name <- factor(z$sample.name,levels = sort(unique(as.vector(z$sample.name))))
+z$iC10 <- factor(z$iC10)
+
+ggplot(z) + aes(x=sample.name,y=iC10.prob,fill=iC10) + geom_col() + facet_grid(total.mil.reads~.) +
+  theme_bw(15) + theme(axis.text.x = element_text(angle=-90,hjust = 0)) + xlab("") + 
+  scale_fill_manual(values=c('#FF5500', '#00EE76', '#CD3278','#00C5CD', '#8B0000','#FFFF40', '#0000CD', '#FFAA00', '#EE82EE', '#7D26CD'))
+```
+
+```{r}
+z <- data.table(melt(sapply(res.pdx,"[[","gof")))
+z <- z[,.(sample.name=Var1,total.mil.reads=as.integer(tstrsplit(Var2,"\\.")[[1]]),gof=value)]
+ggplot(z) + aes(x=total.mil.reads,y=gof,group=sample.name) + geom_line()
+```
+
+
+```{r}
+x <- rnaseq.pdx$human
+keyMap <- data.table(getBM(attributes=c('hgnc_symbol','ensembl_gene_id'),filters = 'ensembl_gene_id', values = rownames(x), mart = ensembl))
+rownames(x) <- keyMap[match(rownames(x),ensembl_gene_id),hgnc_symbol]
+
+data(Map.Exp)
+y <- x[rownames(x) %in% Map.Exp$Gene_symbol,]
+y <- y[rowSums(y)!=0,]
+
+z <- rbind(
+  data.table(patient=rnaseq.pdx$meta$patient,iC10=apply(res.pdx[[1]]$res,1,which.max),genes="all",pca.run(x)[,1:2]),
+  data.table(patient=rnaseq.pdx$meta$patient,iC10=apply(res.pdx[[1]]$res,1,which.max),genes="subset",pca.run(y,N=nrow(y))[,1:2])
+)
+
+ggplot(z) + aes(x=PC1,y=PC2,colour=factor(iC10),label=patient) + geom_text() + theme_bw(15) + facet_wrap(~genes,scales = "free")
+```

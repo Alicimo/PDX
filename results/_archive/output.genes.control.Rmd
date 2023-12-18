@@ -1,0 +1,73 @@
+---
+title: "PDX: Output list of expressed genes for each model in SLX-13120"
+output:
+  html_notebook: default
+---
+
+#Load libraries and data
+```{r, message=FALSE, warning=FALSE}
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(limma)
+library(edgeR)
+library(biomaRt)
+
+source("src/load.PDX.R")
+rnaseq <- get.PDX()
+rnaseq <- subset.PDX(rnaseq,rnaseq$meta[,Pool=="SLX-13120" & !is.na(Drug) & Drug=="Control"])
+```
+
+```{r}
+genes <- list()
+
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+genes$human <- getBM(attributes=c("ensembl_gene_id","hgnc_symbol","start_position","end_position"),filter="ensembl_gene_id",values=rownames(rnaseq$human),mart=ensembl)
+genes$human$length <- genes$human$end_position - genes$human$start_position
+rnaseq$human <- rnaseq$human[rownames(rnaseq$human) %in% genes$human$ensembl_gene_id,]
+genes$human <- genes$human[match(rownames(rnaseq$human),genes$human$ensembl_gene_id),]
+
+ensembl <- useMart("ensembl",dataset="mmusculus_gene_ensembl")
+genes$mouse <- getBM(attributes=c("ensembl_gene_id","mgi_symbol","start_position","end_position"),filter="ensembl_gene_id",values=rownames(rnaseq$mouse),mart=ensembl)
+genes$mouse$length <- genes$mouse$end_position - genes$mouse$start_position
+rnaseq$mouse <- rnaseq$mouse[rownames(rnaseq$mouse) %in% genes$mouse$ensembl_gene_id,]
+genes$mouse <- genes$mouse[match(rownames(rnaseq$mouse),genes$mouse$ensembl_gene_id),]
+```
+
+```{r}
+merged <- list()
+merged$meta <- data.table()
+merged$human <- list()
+merged$mouse <- list()
+
+for (sname in rnaseq$meta[,unique(Sample.name)]){
+  x <- rnaseq$meta[,Sample.name==sname]
+  merged$meta <-c(merged$meta,list(rnaseq$meta[x,.(Sample.name,patient,biopsy,tumor.type,xenograft)][,lapply(.SD,unique)]))
+  merged$human <- c(merged$human,as.data.table(apply(rnaseq$human[,x],1,median)))
+  merged$mouse <- c(merged$mouse,as.data.table(apply(rnaseq$mouse[,x],1,median)))
+}
+
+merged$meta <- rbindlist(merged$meta)
+merged$human <- as.matrix(do.call(cbind,merged$human))
+merged$mouse <- as.matrix(do.call(cbind,merged$mouse))
+
+rownames(merged$human) <- rownames(rnaseq$human)
+colnames(merged$human) <- merged$meta[,Sample.name]
+
+rownames(merged$mouse) <- rownames(rnaseq$mouse)
+colnames(merged$mouse) <- merged$meta[,Sample.name]
+```
+
+```{r}
+x <- as.data.table(rpkm(merged$mouse,genes$mouse$length))
+x$ensembl_id <- rownames(merged$mouse)
+x$mgi_symbol <- genes$mouse$mgi_symbol
+write.csv(x,"SLX-13120.merged.mouse.RPKM.csv")
+```
+
+```{r}
+x <- as.data.table(rpkm(merged$human,genes$human$length))
+x$ensembl_id <- rownames(merged$human)
+x$hgnc_symbol <- genes$human$hgnc_symbol
+write.csv(x,"SLX-13120.merged.human.RPKM.csv")
+```

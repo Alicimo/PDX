@@ -1,0 +1,96 @@
+---
+title: 'PDX: Drug trails'
+author: "Alistair Martin"
+date: '`r format(Sys.time(), "Last modified: %d %b %Y")`'
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+    toc_float: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: STG201 differences
+layout: page
+---
+
+# Load libraries, functions and data
+```{r, message=F, warning=F, echo=F}
+library(ggplot2)
+library(ggthemes)
+library(pheatmap)
+
+root.dir <- "~/OneDrive/projects/"
+source(paste0(root.dir,"R.utils/RNASEQ.utils.R"))
+load(paste0(root.dir,"shared.data/gene.lists/mouse_c6_v5p2.rdata"))
+load(paste0(root.dir,"shared.data/gene.lists/mouse_c2_v5p2.rdata"))
+load(paste0(root.dir,"shared.data/gene.lists/human_c6_v5p2.rdata"))
+load(paste0(root.dir,"shared.data/gene.lists/human_c2_v5p2.rdata"))
+
+project.dir <- paste0(root.dir,"PDX/")
+source(paste0(project.dir,"src/load.PDX.R"))
+rnaseq <- get.PDX()
+
+meta <- load.meta()
+meta <- subset.meta(meta,meta[,which(patient=="STG201" | pdx=="STG201" )])
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,Sample.name] %in% meta[,Sample.name])
+```
+
+```{r,fig.width=12,fig.height=6}
+read.depth.plots(rnaseq$meta)
+```
+
+As expected from previous analysis, we have two failed libaries that need to be removed, and two samples with high stroma content, which likely should be removed as well.
+
+```{r}
+rnaseq <- subset.PDX(rnaseq, rnaseq$meta[,!(Sample.name %in% c("STG201-M1-T","201STG_ Olaparib-response_6350L_12R"))])
+rnaseq <- merge.PDX(rnaseq)
+rnaseq$meta <- merge(rnaseq$meta,meta,sort=F)
+rnaseq$meta[,merged.lanes:=as.numeric(as.factor(merged.lanes))]
+rnaseq$meta[is.na(drug),drug:="control"]
+```
+
+Is there a cellularity difference between the projects?
+
+```{r}
+x <- melt(rnaseq$meta,id.vars=c("Sample.name","merged.lanes","drug"),measure.vars = c("mouse.library.size","human.library.size"))
+x[,value:=value/sum(value),Sample.name]
+ggplot(x[variable=="mouse.library.size"]) + aes(x=drug,y=value,fill=drug) + geom_boxplot() + theme(axis.text.x=element_text(angle=90,hjust=1)) + facet_wrap(~merged.lanes,scales = "free_y")
+```
+
+# PCA w/o batch correction
+
+## Human
+
+```{r}
+pca <- pca.run(rnaseq$human)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=as.factor(merged.lanes)) + geom_point(size=5)
+```
+
+```{r}
+x <- pca.prep(rnaseq$human)
+labels.row <- rep("",nrow(x))
+ann.col <- as.data.frame(rnaseq$meta[,.(merged.lanes=factor(merged.lanes),drug)])
+rownames(ann.col) <- rnaseq$meta[,Sample.name]
+pheatmap(x,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
+
+## Mouse
+
+```{r}
+pca <- pca.run(rnaseq$mouse)
+summary(pca)
+pca <- cbind(rnaseq$meta,pca$x)
+ggplot(pca) + aes(x=PC1,y=PC2,col=drug,shape=as.factor(merged.lanes)) + geom_point(size=5)
+```
+
+```{r}
+x <- pca.prep(rnaseq$mouse)
+labels.row <- rep("",nrow(x))
+ann.col <- as.data.frame(rnaseq$meta[,.(merged.lanes=factor(merged.lanes),drug)])
+rownames(ann.col) <- rnaseq$meta[,Sample.name]
+pheatmap(x,labels_row=labels.row,annotation_col = ann.col,scale="row")
+```
